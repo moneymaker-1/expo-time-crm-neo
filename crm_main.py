@@ -5,322 +5,212 @@ import plotly.express as px
 from datetime import datetime
 import re 
 
-# قائمة الدول العربية ومفاتيحها
-COUNTRY_CODES = {
-    "السعودية (+966)": "966", "الإمارات (+971)": "971", "مصر (+20)": "20",
-    "الكويت (+965)": "965", "قطر (+974)": "974", "عمان (+968)": "968",
-    "الأردن (+962)": "962", "البحرين (+973)": "973", "العراق (+964)": "964",
-    "المغرب (+212)": "212", "الجزائر (+213)": "213", "تونس (+216)": "216",
-    "ليبيا (+218)": "218", "السودان (+249)": "249", "اليمن (+967)": "967"
-}
-
 # ==========================================
 #              إعدادات النظام
 # ==========================================
+st.set_page_config(page_title="Expotime CRM", layout="wide", page_icon="🏢")
 
-st.set_page_config(
-    page_title="Expotime CRM",
-    layout="wide",
-    page_icon="🏢",
-    initial_sidebar_state="expanded"
-)
+# قاموس ترجمة الأعمدة للعرض (لتحويل الواجهة للعربية)
+COLUMN_MAP = {
+    "id": "المعرف",
+    "company_name": "اسم الشركة",
+    "sector": "القطاع",
+    "contact_person": "الشخص المسؤول",
+    "position": "المنصب",
+    "mobile": "رقم الجوال",
+    "email": "البريد الإلكتروني",
+    "event_name": "الفعالية",
+    "sales_rep": "المندوب",
+    "status": "الحالة",
+    "contract_amount": "مبلغ التعميد"
+}
 
-# --- إدارة الجلسة ---
-if 'logged_in' not in st.session_state:
-    st.session_state['logged_in'] = False
+# قائمة الـ 22 دولة عربية ومفاتيحها
+COUNTRY_CODES = {
+    "السعودية (+966)": "966", "الإمارات (+971)": "971", "مصر (+20)": "20",
+    "الكويت (+965)": "965", "قطر (+974)": "974", "عمان (+968)": "968",
+    "البحرين (+973)": "973", "الأردن (+962)": "962", "العراق (+964)": "964",
+    "اليمن (+967)": "967", "فلسطين (+970)": "970", "لبنان (+961)": "961",
+    "سوريا (+963)": "963", "المغرب (+212)": "212", "الجزائر (+213)": "213",
+    "تونس (+216)": "216", "ليبيا (+218)": "218", "السودان (+249)": "249",
+    "موريتانيا (+222)": "222", "الصومال (+252)": "252", "جيبوتي (+253)": "253",
+    "جزر القمر (+269)": "269"
+}
 
-if 'user_role' not in st.session_state: 
-    st.session_state['user_role'] = None
-
-if 'real_name' not in st.session_state: 
-    st.session_state['real_name'] = None
+TRIP_STAGES = ["جديد", "تم الاتصال", "تم الاجتماع", "تم تقديم التصميم", "تم تقديم عرض مالي", "تم التعديل", "تم التعميد", "تم الرفض"]
 
 # --- قاعدة البيانات ---
 def init_db():
-    conn = sqlite3.connect('company_crm.db')
+    conn = sqlite3.connect('company_crm.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
-        mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد')''')
-    
+        mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد', contract_amount REAL DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS status_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, customer_name TEXT, 
         updated_status TEXT, changed_by TEXT, notes TEXT, timestamp TEXT)''')
-    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
-    
     c.execute("SELECT * FROM users WHERE username = 'admin'")
     if not c.fetchone():
         c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", ('admin', '1234', 'admin', 'المدير العام'))
-        conn.commit()
     conn.commit()
     return conn
 
 conn = init_db()
-SECTORS = ["تقنية", "عقارات", "تجارة تجزئة", "صناعة", "خدمات"]
-TRIP_STAGES = ["جديد", "تم الاتصال", "تم الاجتماع", "تم تقديم التصميم", "تم تقديم عرض مالي", "تم التعديل", "تم التعميد", "تم الرفض"]
 
-# ==========================================
-#              دوال التحقق (VALIDATION)
-# ==========================================
-
-def validate_mobile(mobile):
-    cleaned_mobile = mobile.replace(" ", "").strip()
-    return len(cleaned_mobile) >= 7 and cleaned_mobile.isdigit()
-
-def validate_email(email):
-    regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    return re.match(regex, email) is not None
-
-# ==========================================
-#              دوال النظام
-# ==========================================
-
-def login_user(username, password):
+# --- دوال التحقق ---
+def check_duplicate(name, mob):
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND password = ?", (username, password))
-    return c.fetchone()
-
-def create_user(username, password, real_name, role='rep'):
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (username, password, role, real_name))
-        conn.commit()
-        return True
-    except: return False
-
-def update_customer_info(cid, new_name, new_mobile, new_email):
-    c = conn.cursor()
-    c.execute("UPDATE customers SET company_name = ?, mobile = ?, email = ? WHERE id = ?", 
-              (new_name, new_mobile, new_email, cid))
-    conn.commit()
-
-def update_customer_status(cid, cname, new_status, user, notes=""):
-    c = conn.cursor()
-    c.execute("UPDATE customers SET status = ? WHERE id = ?", (new_status, cid))
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO status_history (customer_id, customer_name, updated_status, changed_by, notes, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-              (cid, cname, new_status, user, notes, now))
-    conn.commit()
-
-# --- باقي الدوال ---
-def update_user_password(user, pwd):
-    conn.execute("UPDATE users SET password = ? WHERE username = ?", (pwd, user))
-    conn.commit()
-
-def delete_user(user):
-    conn.execute("DELETE FROM users WHERE username = ?", (user,))
-    conn.commit()
-
-def get_all_users(): return pd.read_sql("SELECT username, role, real_name FROM users", conn)
-def get_all_reps(): return pd.read_sql("SELECT real_name FROM users WHERE role = 'rep'", conn)['real_name'].tolist()
-def get_all_data(): return pd.read_sql("SELECT * FROM customers", conn)
-def get_my_data(rep): return pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(rep,))
-def get_client_history(cid): return pd.read_sql("SELECT * FROM status_history WHERE customer_id = ? ORDER BY id DESC", conn, params=(cid,))
-def get_history_log(): return pd.read_sql("SELECT * FROM status_history ORDER BY id DESC", conn)
-
-def add_customer(data):
-    c = conn.cursor()
-    c.execute('''INSERT INTO customers (company_name, sector, contact_person, position, mobile, email, event_name, sales_rep, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
-    conn.commit()
-
-def bulk_import(df, reps):
-    c = conn.cursor()
-    count = 0
-    df.rename(columns={'contact_name': 'contact_person', 'mobile_clean': 'mobile', 'suitable_exhibitions': 'event_name', 'salesrep': 'sales_rep'}, inplace=True)
-    df.columns = df.columns.str.lower()
-    if 'company_name' not in df.columns: return 0
-    for _, row in df.iterrows():
-        rep = row.get('sales_rep', 'غير معين')
-        if rep not in reps: rep = 'غير معين'
-        try:
-            data = (row.get('company_name'), row.get('sector', ''), row.get('contact_person', ''), row.get('position', ''), 
-                    row.get('mobile', ''), row.get('email', ''), row.get('event_name', ''), rep, "جديد")
-            if data[0]:
-                add_customer(data)
-                count += 1
-        except: continue
-    return count
+    clean_name = re.sub(r'شركة|مؤسسة|المحدودة', '', name).strip()
+    c.execute("SELECT company_name, sales_rep FROM customers WHERE company_name LIKE ?", (f'%{clean_name}%',))
+    res = c.fetchone()
+    if res: return f"الشركة مكررة مع المندوب: {res[1]}"
+    c.execute("SELECT mobile, sales_rep FROM customers WHERE mobile = ?", (mob,))
+    res = c.fetchone()
+    if res: return f"الجوال مكرر مع المندوب: {res[1]}"
+    return None
 
 # ==========================================
 #              واجهة التطبيق
 # ==========================================
 
-if not st.session_state['logged_in']:
-    col1, col2, col3 = st.columns([1,2,1])
-    with col2:
-        st.title("🔐 Expo Time CRM")
-        choice = st.selectbox("القائمة", ["تسجيل دخول", "تسجيل مندوب جديد"])
-        
-        if choice == "تسجيل دخول":
-            user = st.text_input("اسم المستخدم")
-            pw = st.text_input("كلمة المرور", type="password")
-            if st.button("دخول"):
-                account = login_user(user, pw)
-                if account:
-                    st.session_state['logged_in'] = True
-                    st.session_state['user_role'] = account[2]
-                    st.session_state['real_name'] = account[3]
-                    st.rerun()
-                else: st.error("بيانات خاطئة")
-        else:
-            name = st.text_input("الاسم الكامل")
-            user = st.text_input("اسم المستخدم")
-            pw = st.text_input("كلمة المرور", type="password")
-            if st.button("تسجيل"):
-                if create_user(user, pw, name): st.success("تم التسجيل")
-                else: st.error("المستخدم موجود")
-
+if not st.session_state.get('logged_in'):
+    st.title("🔐 Expo Time CRM")
+    choice = st.selectbox("القائمة", ["تسجيل دخول", "تسجيل مندوب جديد"])
+    user = st.text_input("اسم المستخدم")
+    pw = st.text_input("كلمة المرور", type="password")
+    if st.button("دخول"):
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND password=?", (user, pw))
+        acc = c.fetchone()
+        if acc:
+            st.session_state.update({'logged_in': True, 'user_role': acc[2], 'real_name': acc[3], 'username': acc[0]})
+            st.rerun()
+        else: st.error("خطأ في البيانات")
 else:
+    role = st.session_state['user_role']
     with st.sidebar:
         st.title(f"مرحباً {st.session_state['real_name']}")
-        role = st.session_state['user_role']
-        if role == 'admin':
-            menu = ["لوحة المدير", "المستخدمين", "استيراد ملف", "إضافة عميل", "بوابة المبيعات", "بحث شامل", "خروج"]
-        else:
-            menu = ["بوابة المبيعات", "إضافة عميل", "خروج"]
+        menu = ["بوابة المبيعات", "إضافة عميل", "لوحة المدير", "المستخدمين", "استيراد ملف", "بحث شامل", "خروج"] if role == 'admin' else ["بوابة المبيعات", "إضافة عميل", "خروج"]
         nav = st.radio("التنقل", menu)
-        if nav == "خروج":
-            st.session_state.clear()
-            st.rerun()
+        if nav == "خروج": st.session_state.clear(); st.rerun()
 
+    # --- بوابة المبيعات ---
     if nav == "بوابة المبيعات":
-        st.header("💼 إدارة رحلة العملاء")
-        tab_my, tab_all = st.tabs(["📂 عملائي (بحث وإدارة)", "🌍 قاعدة البيانات الشاملة"])
+        st.header("💼 إدارة العملاء")
+        t1, t2 = st.tabs(["📂 عملائي", "🌍 قاعدة البيانات الشاملة"])
         
-        with tab_my:
-            rep_name = st.session_state['real_name']
+        with t1:
+            my_name = st.session_state['real_name']
             if role == 'admin':
-                reps = get_all_reps()
-                rep_name = st.selectbox("اختر المندوب للعرض:", reps) if reps else rep_name
-                
-            my_data = get_my_data(rep_name)
+                reps = pd.read_sql("SELECT real_name FROM users WHERE role='rep'", conn)['real_name'].tolist()
+                my_name = st.selectbox("اختر المندوب:", reps) if reps else my_name
             
-            if not my_data.empty:
-                col_search, col_filter = st.columns([2,1])
-                with col_search:
-                    search_q = st.text_input("🔎 ابحث في عملائك (اسم، جوال...):", key="search_my")
-                with col_filter:
-                    filter_status = st.selectbox("فلترة بالمرحلة:", ["الكل"] + TRIP_STAGES)
+            df = pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(my_name,))
+            if not df.empty:
+                search_q = st.text_input("🔎 ابحث بالاسم:")
+                df_f = df[df['company_name'].str.contains(search_q, case=False)]
                 
-                df_view = my_data.copy()
-                if search_q:
-                    df_view = df_view[df_view.astype(str).apply(lambda x: x.str.contains(search_q, case=False)).any(axis=1)]
-                if filter_status != "الكل":
-                    df_view = df_view[df_view['status'] == filter_status]
+                # عرض الجدول معرباً
+                st.dataframe(df_f.rename(columns=COLUMN_MAP), use_container_width=True, hide_index=True)
                 
-                client_options = {row['id']: f"{row['company_name']} - {row['contact_person']}" for i, row in df_view.iterrows()}
+                st.divider()
+                selected_id = st.selectbox("اختر شركة للتعديل أو التواصل:", df_f['id'].tolist(), format_func=lambda x: df_f[df_f['id']==x]['company_name'].values[0])
+                row = df[df['id']==selected_id].iloc[0]
                 
-                if client_options:
-                    selected_id = st.selectbox("👇 اختر العميل لإدارة ملفه:", options=list(client_options.keys()), format_func=lambda x: client_options[x])
-                    st.divider()
-                    client_row = df_view[df_view['id'] == selected_id].iloc[0]
-                    c1, c2 = st.columns([1, 1.5])
-                    
+                with st.form("edit_area"):
+                    c1, c2 = st.columns(2)
                     with c1:
-                        st.subheader("📋 بيانات العميل")
-                        # زر الواتساب المباشر
-                        wa_number = re.sub(r'\D', '', str(client_row['mobile']))
-                        wa_url = f"https://wa.me/{wa_number}"
-                        st.markdown(f'''<a href="{wa_url}" target="_blank"><button style="background-color: #25D366; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; width: 100%; margin-bottom: 15px;">💬 مراسلة واتساب</button></a>''', unsafe_allow_html=True)
-
-                        with st.form("update_info"):
-                            # السماح للمدير بتعديل اسم الشركة
-                            new_name = st.text_input("الشركة", value=client_row['company_name'], disabled=(role != 'admin'))
-                            new_mob = st.text_input("الجوال", value=client_row['mobile'])
-                            new_email = st.text_input("الإيميل", value=client_row['email'])
-                            
-                            if st.form_submit_button("تحديث البيانات"):
-                                update_customer_info(client_row['id'], new_name, new_mob, new_email)
-                                st.success("تم تحديث البيانات!")
-                                st.rerun()
-                        st.info(f"**المنصب:** {client_row['position']} | **الفعالية:** {client_row['event_name']} | **القطاع:** {client_row['sector']}")
-
+                        # المدير فقط يعدل اسم الشركة
+                        new_name = st.text_input("اسم الشركة", value=row['company_name'], disabled=(role != 'admin'))
+                        new_mob = st.text_input("الجوال", value=row['mobile'])
+                        wa_url = f"https://wa.me/{row['mobile'].replace('+', '').replace(' ', '')}"
+                        st.link_button("💬 واتساب مباشر", wa_url)
                     with c2:
-                        st.subheader("🚀 تحديث مرحلة الرحلة")
-                        current_stage_idx = TRIP_STAGES.index(client_row['status']) if client_row['status'] in TRIP_STAGES else 0
-                        with st.form("status_update"):
-                            new_stage = st.selectbox("انقل العميل للمرحلة التالية:", TRIP_STAGES, index=current_stage_idx)
-                            note = st.text_area("ملاحظات المتابعة (ماذا تم؟):", placeholder="سجل ملاحظاتك هنا...")
-                            if st.form_submit_button("✅ تسجيل العملية"):
-                                update_customer_status(client_row['id'], client_row['company_name'], new_stage, st.session_state['real_name'], note)
-                                st.success(f"تم نقل العميل إلى: {new_stage}")
-                                st.rerun()
-                        
-                        st.subheader("⏳ سجل المتابعات")
-                        history = get_client_history(client_row['id'])
-                        if not history.empty:
-                            for i, h in history.iterrows():
-                                with st.chat_message("user"):
-                                    st.write(f"**{h['updated_status']}** - {h['timestamp']}")
-                                    st.caption(f"بواسطة:{h['changed_by']}")
-                                    if h['notes']: st.info(f"📝 {h['notes']}")
-                        else: st.write("لا يوجد سجل متابعات بعد.")
+                        new_st = st.selectbox("الحالة", TRIP_STAGES, index=TRIP_STAGES.index(row['status']))
+                        note = st.text_area("ملاحظات المتابعة")
+                    
+                    if st.form_submit_button("حفظ التعديلات"):
+                        conn.execute("UPDATE customers SET company_name=?, mobile=?, status=? WHERE id=?", (new_name, new_mob, new_st, selected_id))
+                        conn.execute("INSERT INTO status_history (customer_id, customer_name, updated_status, changed_by, notes, timestamp) VALUES (?,?,?,?,?,?)", 
+                                     (selected_id, new_name, new_st, st.session_state['real_name'], note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                        conn.commit(); st.success("تم الحفظ"); st.rerun()
+            else: st.info("لا توجد بيانات.")
 
+        with t2:
+            all_df = pd.read_sql("SELECT * FROM customers", conn)
+            st.dataframe(all_df.rename(columns=COLUMN_MAP), use_container_width=True, hide_index=True)
+
+    # --- إضافة عميل ---
     elif nav == "إضافة عميل":
-        st.header("➕ إضافة عميل جديد")
-        with st.form("new_c"):
+        st.header("➕ إضافة عميل")
+        with st.form("add_c"):
             c1, c2 = st.columns(2)
             with c1:
-                comp = st.text_input("اسم الشركة *")
-                sec = st.selectbox("القطاع", SECTORS)
-                cont = st.text_input("الشخص المسؤول")
-                pos = st.text_input("المنصب (اختياري)") 
+                comp, sec = st.text_input("الشركة *"), st.selectbox("القطاع", ["تقنية", "عقارات", "تجارة", "صناعة"])
+                cont, pos = st.text_input("المسؤول"), st.text_input("المنصب")
             with c2:
-                # مفتاح الدولة
-                country = st.selectbox("مفتاح الدولة *", list(COUNTRY_CODES.keys()))
-                mob_num = st.text_input("رقم الجوال * (بدون أصفار في البداية)")
-                em = st.text_input("الإيميل *")
-                evt = st.text_input("الفعالية")
+                code = st.selectbox("الدولة *", list(COUNTRY_CODES.keys()))
+                mob = st.text_input("الجوال *")
+                em, evt = st.text_input("الإيميل"), st.text_input("الفعالية")
             
-            if role == 'admin':
-                reps = get_all_reps()
-                rep = st.selectbox("المندوب", reps) if reps else st.text_input("المندوب")
-            else:
-                rep = st.text_input("المندوب", value=st.session_state['real_name'], disabled=True)
+            rep = st.text_input("المندوب", value=st.session_state['real_name'], disabled=(role != 'admin'))
             
             if st.form_submit_button("حفظ"):
-                full_mobile = f"+{COUNTRY_CODES[country]}{mob_num.replace(' ', '')}"
-                if comp and mob_num and em:
-                    add_customer((comp, sec, cont, pos, full_mobile, em, evt, rep, "جديد"))
-                    st.success(f"تم الحفظ بنجاح بالرقم: {full_mobile}")
-                else:
-                    st.error("يرجى ملء الحقول المطلوبة")
+                full_mob = f"+{COUNTRY_CODES[code]}{mob.strip()}"
+                dup = check_duplicate(comp, full_mob)
+                if dup: st.error(dup)
+                elif comp and mob:
+                    conn.execute("INSERT INTO customers (company_name, sector, contact_person, position, mobile, email, event_name, sales_rep) VALUES (?,?,?,?,?,?,?,?)",
+                                 (comp, sec, cont, pos, full_mob, em, evt, rep))
+                    conn.commit(); st.success("تم الحفظ")
+
+    # --- استيراد ملف ---
+    elif nav == "استيراد ملف" and role == 'admin':
+        st.header("📤 استيراد داتا")
+        f = st.file_uploader("اختر ملف", type=['xlsx', 'csv'])
+        if f and st.button("🚀 بدء الاستيراد والربط"):
+            df_in = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
+            # محاولة تعريب الأعمدة برمجياً لربطها
+            inv_map = {v: k for k, v in COLUMN_MAP.items()}
+            df_in.rename(columns=inv_map, inplace=True)
+            df_in.to_sql('customers', conn, if_exists='append', index=False)
+            st.success("تم الاستيراد والربط بنجاح!")
+
+    # --- بحث شامل ---
+    elif nav == "بحث شامل":
+        st.header("🔍 محرك البحث")
+        q = st.text_input("ابحث عن شركة أو جوال:")
+        if q:
+            res = pd.read_sql(f"SELECT * FROM customers WHERE company_name LIKE '%{q}%' OR mobile LIKE '%{q}%'", conn)
+            st.dataframe(res.rename(columns=COLUMN_MAP), use_container_width=True, hide_index=True)
+
+    # --- المستخدمين ولوحة المدير ---
+    elif nav == "المستخدمين" and role == 'admin':
+        st.header("👥 إدارة المستخدمين")
+        t_add, t_pass, t_del = st.tabs(["إضافة", "تعديل كلمة مرور", "حذف"])
+        with t_add:
+            n, u, p = st.text_input("الاسم"), st.text_input("يوزر"), st.text_input("باس")
+            if st.button("تأكيد الإضافة"):
+                conn.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (u, p, 'rep', n))
+                conn.commit(); st.success("تم")
+        with t_pass:
+            users = pd.read_sql("SELECT username FROM users", conn)['username'].tolist()
+            u_sel = st.selectbox("اختر المستخدم", users)
+            new_p = st.text_input("كلمة مرور جديدة")
+            if st.button("تحديث الباسورد"):
+                conn.execute("UPDATE users SET password=? WHERE username=?", (new_p, u_sel))
+                conn.commit(); st.success("تم")
+        with t_del:
+            u_del = st.selectbox("حذف مستخدم", [x for x in users if x != 'admin'])
+            if st.button("حذف نهائي"):
+                conn.execute("DELETE FROM users WHERE username=?", (u_del,))
+                conn.commit(); st.success("تم"); st.rerun()
 
     elif nav == "لوحة المدير" and role == 'admin':
         st.header("📊 الإحصائيات")
-        df = get_all_data()
-        if not df.empty:
-            c1, c2 = st.columns(2)
-            c1.metric("العملاء",len(df))
-            c2.metric("تم التعميد", len(df[df['status'] == "تم التعميد"]))
-            st.plotly_chart(px.bar(df, x='sales_rep', color='status', category_orders={"status": TRIP_STAGES}), use_container_width=True)
-            st.dataframe(get_history_log(), use_container_width=True)
-
-    elif nav == "المستخدمين" and role == 'admin':
-        st.header("إدارة المستخدمين")
-        t1, t2, t3 = st.tabs(["إضافة", "تعديل كلمة مرور", "حذف"])
-        with t1:
-            n = st.text_input("الاسم")
-            u = st.text_input("يوزر")
-            p = st.text_input("باس")
-            if st.button("إنشاء"):
-                if create_user(u,p,n): st.success("تم") 
-                else: st.error("موجود")
-        users = get_all_users()
-        with t2:
-            u_sel = st.selectbox("المستخدم", users['username'])
-            np = st.text_input("كلمة مرور جديدة")
-            if st.button("تحديث"): update_user_password(u_sel, np); st.success("تم")
-        with t3:
-            u_del = st.selectbox("حذف مستخدم", users[users['username']!='admin']['username'])
-            if st.button("حذف"): delete_user(u_del); st.success("تم"); st.rerun()
-
-    elif nav == "بحث شامل":
-        st.header("🔍 بحث في كل النظام")
-        s = st.text_input("بحث...")
-        if s:
-            df = get_all_data()
-            st.dataframe(df[df.astype(str).apply(lambda x: x.str.contains(s, case=False)).any(axis=1)])
+        df_all = pd.read_sql("SELECT * FROM customers", conn)
+        if not df_all.empty:
+            st.plotly_chart(px.bar(df_all, x='sales_rep', color='status', title="توزيع الحالات حسب المناديب"), use_container_width=True)
+            st.dataframe(pd.read_sql("SELECT * FROM status_history ORDER BY id DESC", conn).rename(columns=COLUMN_MAP), use_container_width=True)
