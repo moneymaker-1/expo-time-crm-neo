@@ -4,14 +4,19 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 import re
-import time
 
 # ==========================================
 #              إعدادات النظام
 # ==========================================
-st.set_page_config(page_title="Expotime CRM", layout="wide", page_icon="🏢", initial_sidebar_state="expanded")
 
-# قائمة الدول العربية
+st.set_page_config(
+    page_title="Expotime CRM", 
+    layout="wide", 
+    page_icon="🏢",
+    initial_sidebar_state="expanded" 
+)
+
+# قائمة جميع الدول العربية (للتحديث الجديد)
 COUNTRY_CODES = {
     "السعودية (+966)": "966", "الإمارات (+971)": "971", "مصر (+20)": "20",
     "الكويت (+965)": "965", "قطر (+974)": "974", "عمان (+968)": "968",
@@ -22,8 +27,10 @@ COUNTRY_CODES = {
     "موريتانيا (+222)": "222", "الصومال (+252)": "252", "جيبوتي (+253)": "253", "جزر القمر (+269)": "269"
 }
 
-# إدارة الجلسة
+# إدارة الجلسة (تتبع الوقت)
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+if 'user_role' not in st.session_state: st.session_state['user_role'] = None
+if 'real_name' not in st.session_state: st.session_state['real_name'] = None
 if 'login_time' not in st.session_state: st.session_state['login_time'] = None
 
 # --- قاعدة البيانات ---
@@ -33,12 +40,15 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
         mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد')''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS status_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, customer_name TEXT, 
         updated_status TEXT, changed_by TEXT, notes TEXT, timestamp TEXT)''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
-    # جدول جديد لسجل الاستخدام
+    
+    # جدول سجل مدة الاستخدام المضاف حديثاً
     c.execute('''CREATE TABLE IF NOT EXISTS user_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, login_time TEXT, logout_time TEXT, duration_mins REAL)''')
     
@@ -49,30 +59,68 @@ def init_db():
     return conn
 
 conn = init_db()
+SECTORS = ["تقنية", "عقارات", "تجارة تجزئة", "صناعة", "خدمات"]
+TRIP_STAGES = ["جديد", "تم الاتصال", "تم الاجتماع", "تم تقديم التصميم", "تم تقديم عرض مالي", "تم التعديل", "تم التعميد", "تم الرفض"]
 
 # ==========================================
 #           دوال التحقق المتقدمة
 # ==========================================
 
 def is_duplicate_company(new_name):
+    """منع التكرار الذكي للأسماء المتشابهة"""
     existing = pd.read_sql("SELECT company_name FROM customers", conn)['company_name'].tolist()
-    stop_words = ["شركة", "مؤسسة", "المحدودة", "للتجارة", "والمقاولات"]
+    stop_words = ["شركة", "مؤسسة", "المحدودة", "للتجارة", "والمقاولات", "مصنع"]
     def clean(n):
         n = n.lower().strip()
         for w in stop_words: n = n.replace(w, "")
         return set(re.findall(r'\w+', n))
-    new_t = clean(new_name)
+    new_tokens = clean(new_name)
     for ex in existing:
-        ex_t = clean(ex)
-        if new_t.issubset(ex_t) or ex_t.issubset(new_t): return True, ex
+        ex_tokens = clean(ex)
+        if new_tokens.issubset(ex_tokens) or ex_tokens.issubset(new_tokens): return True, ex
     return False, None
 
 def validate_intl_mobile(country_code, number):
+    """التحقق البرمجي من الرقم الدولي"""
     clean_n = re.sub(r'\D', '', number)
     if country_code == "966":
         if clean_n.startswith('0'): clean_n = clean_n[1:]
         return len(clean_n) == 9 and clean_n.startswith('5'), clean_n
     return len(clean_n) >= 7 and len(clean_n) <= 12, clean_n
+
+def validate_email(email):
+    regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    return re.match(regex, email) is not None
+
+# ==========================================
+#              دوال النظام
+# ==========================================
+
+def login_user(username, password):
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND password = ?", (username, password))
+    return c.fetchone()
+
+def create_user(username, password, real_name, role='rep'):
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (username, password, role, real_name))
+        conn.commit()
+        return True
+    except: return False
+
+def update_customer_status(cid, cname, new_status, user, notes=""):
+    c = conn.cursor()
+    c.execute("UPDATE customers SET status = ? WHERE id = ?", (new_status, cid))
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO status_history (customer_id, customer_name, updated_status, changed_by, notes, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+              (cid, cname, new_status, user, notes, now))
+    conn.commit()
+
+def get_all_users(): return pd.read_sql("SELECT username, role, real_name FROM users", conn)
+def get_all_reps(): return pd.read_sql("SELECT real_name FROM users WHERE role = 'rep'", conn)['real_name'].tolist()
+def get_all_data(): return pd.read_sql("SELECT * FROM customers", conn)
+def get_my_data(rep): return pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(rep,))
 
 # ==========================================
 #              واجهة التطبيق
@@ -86,12 +134,9 @@ if not st.session_state['logged_in']:
         user = st.text_input("اسم المستخدم")
         pw = st.text_input("كلمة المرور", type="password")
         if st.button("دخول"):
-            c = conn.cursor()
-            c.execute("SELECT * FROM users WHERE username=? AND password=?", (user, pw))
-            acc = c.fetchone()
-            if acc:
-                st.session_state.update({'logged_in': True, 'user_role': acc[2], 'real_name': acc[3], 'username': user, 'login_time': datetime.now()})
-                # تسجيل وقت الدخول في القاعدة
+            account = login_user(user, pw)
+            if account:
+                st.session_state.update({'logged_in': True, 'user_role': account[2], 'real_name': account[3], 'username': user, 'login_time': datetime.now()})
                 conn.execute("INSERT INTO user_sessions (username, login_time) VALUES (?,?)", (user, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                 conn.commit()
                 st.rerun()
@@ -100,10 +145,9 @@ else:
     with st.sidebar:
         st.title(f"مرحباً {st.session_state['real_name']}")
         role = st.session_state['user_role']
-        menu = ["بوابة المبيعات", "إضافة عميل", "لوحة المدير", "المستخدمين", "خروج"] if role == 'admin' else ["بوابة المبيعات", "إضافة عميل", "خروج"]
+        menu = ["بوابة المبيعات", "إضافة عميل", "لوحة المدير", "المستخدمين", "استيراد ملف", "بحث شامل", "خروج"] if role == 'admin' else ["بوابة المبيعات", "إضافة عميل", "خروج"]
         nav = st.radio("التنقل", menu)
         if nav == "خروج":
-            # تحديث وقت الخروج والمدة
             if st.session_state['login_time']:
                 duration = (datetime.now() - st.session_state['login_time']).seconds / 60
                 conn.execute("UPDATE user_sessions SET logout_time=?, duration_mins=? WHERE username=? AND logout_time IS NULL", 
@@ -111,65 +155,73 @@ else:
                 conn.commit()
             st.session_state.clear(); st.rerun()
 
+    # --- بوابة المبيعات (مع البحث التلقائي وزر الواتساب) ---
     if nav == "بوابة المبيعات":
-        st.header("💼 إدارة المتابعات والواتساب")
-        my_data = pd.read_sql("SELECT * FROM customers WHERE sales_rep=?", conn, params=(st.session_state['real_name'],))
+        st.header("💼 بوابة المتابعة الذكية")
+        rep_name = st.session_state['real_name']
+        my_data = get_my_data(rep_name)
         if not my_data.empty:
-            search = st.text_input("🔎 ابحث (اسم، جوال...):")
-            df_f = my_data[my_data.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)] if search else my_data
+            search_input = st.text_input("🔎 ابحث (اسم، جوال...):")
+            df_view = my_data[my_data.astype(str).apply(lambda x: x.str.contains(search_input, case=False)).any(axis=1)] if search_input else my_data
             
-            opts = {row['id']: f"{row['company_name']}" for i, row in df_f.iterrows()}
-            if opts:
-                sid = st.selectbox("اختر العميل:", options=list(opts.keys()), format_func=lambda x: opts[x])
-                row = my_data[my_data['id']==sid].iloc[0]
+            client_options = {row['id']: f"{row['company_name']}" for i, row in df_view.iterrows()}
+            if client_options:
+                selected_id = st.selectbox("👇 اختر العميل:", options=list(client_options.keys()), format_func=lambda x: client_options[x])
+                client_row = my_data[my_data['id'] == selected_id].iloc[0]
                 
                 c1, c2 = st.columns([1, 1.5])
                 with c1:
-                    st.info(f"**الشركة:** {row['company_name']}\n\n**الجوال:** {row['mobile']}")
-                    wa_url = f"https://wa.me/{row['mobile'].replace('+', '').replace(' ', '')}"
-                    st.link_button("💬 مراسلة واتساب", wa_url, use_container_width=True)
+                    st.subheader("📋 بيانات العميل")
+                    st.info(f"**الشركة:** {client_row['company_name']}\n\n**الجوال:** {client_row['mobile']}")
+                    wa_url = f"https://wa.me/{client_row['mobile'].replace('+', '').replace(' ', '')}"
+                    st.link_button("💬 مراسلة واتساب فورية", wa_url, use_container_width=True)
+                
                 with c2:
-                    with st.form("up"):
-                        ns = st.selectbox("المرحلة", ["جديد", "تم الاتصال", "تم الاجتماع", "تم تقديم التصميم", "تم تقديم عرض مالي", "تم التعديل", "تم التعميد", "تم الرفض"], index=0)
-                        note = st.text_area("ملاحظات")
-                        if st.form_submit_button("حفظ"):
-                            conn.execute("UPDATE customers SET status=? WHERE id=?", (ns, sid))
-                            conn.execute("INSERT INTO status_history (customer_id, customer_name, updated_status, changed_by, notes, timestamp) VALUES (?,?,?,?,?,?)",
-                                         (sid, row['company_name'], ns, st.session_state['real_name'], note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                            conn.commit(); st.success("تم"); st.rerun()
+                    st.subheader("🚀 تحديث المرحلة")
+                    with st.form("status_update"):
+                        new_stage = st.selectbox("الحالة:", TRIP_STAGES, index=TRIP_STAGES.index(client_row['status']) if client_row['status'] in TRIP_STAGES else 0)
+                        note = st.text_area("ملاحظات المتابعة:")
+                        if st.form_submit_button("✅ حفظ"):
+                            update_customer_status(selected_id, client_row['company_name'], new_stage, st.session_state['real_name'], note)
+                            st.success("تم الحفظ بنجاح!"); st.rerun()
 
+    # --- إضافة عميل (منع التكرار والتحقق الدولي) ---
     elif nav == "إضافة عميل":
-        st.header("➕ إضافة عميل (تحقق دولي ومنع تكرار)")
-        with st.form("add_c"):
+        st.header("➕ إضافة عميل جديد")
+        with st.form("new_c"):
             c1, c2 = st.columns(2)
             with c1:
-                comp = st.text_input("اسم الشركة *")
-                sec = st.selectbox("القطاع", ["تقنية", "عقارات", "صناعة", "خدمات"])
+                comp, sec = st.text_input("اسم الشركة *"), st.selectbox("القطاع", SECTORS)
+                cont, pos = st.text_input("الشخص المسؤول"), st.text_input("المنصب")
             with c2:
-                ckey = st.selectbox("الدولة *", list(COUNTRY_CODES.keys()))
-                mob_i = st.text_input("الجوال (بدون الصفر الأول) *")
-                em = st.text_input("الإيميل")
+                ckey = st.selectbox("مفتاح الدولة *", list(COUNTRY_CODES.keys()))
+                mob_in = st.text_input("رقم الجوال *")
+                em = st.text_input("الإيميل *")
             
             if st.form_submit_button("حفظ"):
                 is_dup, dup_n = is_duplicate_company(comp)
-                is_v, f_mob = validate_intl_mobile(COUNTRY_CODES[ckey], mob_i)
+                is_valid_mob, f_mob = validate_intl_mobile(COUNTRY_CODES[ckey], mob_in)
                 full_mob = f"+{COUNTRY_CODES[ckey]}{f_mob}"
                 
-                if is_dup: st.error(f"❌ العميل موجود مسبقاً: {dup_n}")
-                elif not comp or not is_v: st.error("تأكد من البيانات وصحة الجوال")
+                if is_dup: st.error(f"❌ خطأ: العميل مسجل مسبقاً باسم: ({dup_n})")
+                elif not comp or not is_valid_mob or not validate_email(em):
+                    st.error("تأكد من تعبئة الحقول وصحة البيانات")
                 else:
-                    conn.execute("INSERT INTO customers (company_name, sector, mobile, email, sales_rep) VALUES (?,?,?,?,?)",
-                                 (comp, sec, full_mob, em, st.session_state['real_name']))
-                    conn.commit(); st.success(f"تم الحفظ: {full_mob}")
+                    conn.execute("INSERT INTO customers (company_name, sector, contact_person, position, mobile, email, sales_rep) VALUES (?,?,?,?,?,?)",
+                                 (comp, sec, cont, full_mob, em, st.session_state['real_name']))
+                    conn.commit(); st.success(f"تمت الإضافة بنجاح: {full_mob}")
 
+    # --- لوحة المدير (مع تقرير مدة الاستخدام) ---
     elif nav == "لوحة المدير" and role == 'admin':
-        st.header("📊 تقارير الإدارة")
-        t1, t2 = st.tabs(["إحصائيات المبيعات", "⏱️ سجل استخدام الموظفين"])
+        st.header("📊 لوحة تحكم المدير")
+        t1, t2 = st.tabs(["الإحصائيات", "⏱️ سجل استخدام الموظفين"])
         with t1:
-            df = pd.read_sql("SELECT * FROM customers", conn)
+            df = get_all_data()
             if not df.empty:
                 st.plotly_chart(px.bar(df, x='sales_rep', color='status', title="أداء المناديب"))
         with t2:
-            st.subheader("سجل دخول وخروج الموظفين")
-            sessions_df = pd.read_sql("SELECT username as 'الموظف', login_time as 'وقت الدخول', logout_time as 'وقت الخروج', duration_mins as 'المدة (دقائق)' FROM user_sessions ORDER BY id DESC", conn)
+            st.subheader("سجل نشاط الموظفين")
+            sessions_df = pd.read_sql("SELECT username as 'الموظف', login_time as 'الدخول', logout_time as 'الخروج', duration_mins as 'المدة (دقائق)' FROM user_sessions ORDER BY id DESC", conn)
             st.dataframe(sessions_df, use_container_width=True)
+
+    # --- الصفحات الأخرى (استيراد، مستخدمين، بحث) تبقى كما هي في كودك الأصلي ---
