@@ -65,18 +65,6 @@ SECTORS = ["تقنية", "عقارات", "تجارة تجزئة", "صناعة", 
 TRIP_STAGES = ["جديد", "تم الاتصال", "تم الاجتماع", "تم تقديم التصميم", "تم تقديم عرض مالي", "تم التعديل", "تم التعميد", "تم الرفض"]
 
 # ==========================================
-#              دوال التحقق (VALIDATION)
-# ==========================================
-
-def validate_mobile(mobile):
-    cleaned_mobile = mobile.replace(" ", "").strip()
-    return len(cleaned_mobile) >= 7 and cleaned_mobile.isdigit()
-
-def validate_email(email):
-    regex = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    return re.match(regex, email) is not None
-
-# ==========================================
 #              دوال النظام
 # ==========================================
 
@@ -124,7 +112,6 @@ def get_history_log(): return pd.read_sql("SELECT * FROM status_history ORDER BY
 
 def add_customer(data):
     c = conn.cursor()
-    # فحص التكرار
     c.execute("SELECT sales_rep FROM customers WHERE mobile = ? OR company_name = ?", (data[4], data[0]))
     exists = c.fetchone()
     if exists:
@@ -243,9 +230,17 @@ else:
                         st.success("تم الحفظ")
 
     elif nav == "لوحة المدير" and role == 'admin':
-        st.header("📊 إنجازات المناديب")
-        d1 = st.date_input("من", date(2025, 1, 1))
-        d2 = st.date_input("إلى", date.today())
+        st.header("📊 إحصائيات النظام")
+        
+        # --- إضافة إجمالي عدد الداتا ---
+        all_data = get_all_data()
+        total_customers = len(all_data)
+        st.metric(label="👥 إجمالي عدد العملاء في الداتا", value=total_customers)
+        st.divider()
+
+        st.subheader("📈 إنجازات المناديب التفصيلية")
+        d1 = st.date_input("من تاريخ", date(2025, 1, 1))
+        d2 = st.date_input("إلى تاريخ", date.today())
         hist = get_history_log()
         if not hist.empty:
             hist['timestamp'] = pd.to_datetime(hist['timestamp'])
@@ -253,6 +248,7 @@ else:
             if not filt.empty:
                 summary = filt.groupby(['changed_by', 'updated_status']).size().unstack(fill_value=0)
                 st.dataframe(summary, use_container_width=True)
+            else: st.warning("لا توجد عمليات مسجلة في هذه الفترة.")
 
     elif nav == "المستخدمين" and role == 'admin':
         st.header("👥 إدارة المستخدمين")
