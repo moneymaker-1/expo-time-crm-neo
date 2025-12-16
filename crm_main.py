@@ -30,7 +30,7 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
-        mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد')''')
+        mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد', contract_amount REAL DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS status_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, customer_name TEXT, 
         updated_status TEXT, changed_by TEXT, notes TEXT, timestamp TEXT)''')
@@ -43,18 +43,6 @@ def init_db():
     return conn
 
 conn = init_db()
-
-# --- دوال التحقق ---
-def check_duplicate(name, mob):
-    c = conn.cursor()
-    clean_name = re.sub(r'شركة|مؤسسة|المحدودة', '', name).strip()
-    c.execute("SELECT company_name, sales_rep FROM customers WHERE company_name LIKE ?", (f'%{clean_name}%',))
-    res = c.fetchone()
-    if res: return f"الشركة مكررة مع المندوب: {res[1]}"
-    c.execute("SELECT mobile, sales_rep FROM customers WHERE mobile = ?", (mob,))
-    res = c.fetchone()
-    if res: return f"الجوال مكرر مع المندوب: {res[1]}"
-    return None
 
 # ==========================================
 #              واجهة التطبيق
@@ -84,118 +72,113 @@ else:
     # --- بوابة المبيعات ---
     if nav == "بوابة المبيعات":
         st.header("💼 إدارة العملاء")
-        t1, t2 = st.tabs(["📂 عملائي", "🌍 قاعدة البيانات الشاملة"])
-        with t1:
-            my_name = st.session_state['real_name']
-            if role == 'admin':
-                reps = pd.read_sql("SELECT real_name FROM users WHERE role='rep'", conn)['real_name'].tolist()
-                my_name = st.selectbox("اختر المندوب:", reps) if reps else my_name
+        rep_n = st.session_state['real_name']
+        if role == 'admin':
+            reps = pd.read_sql("SELECT real_name FROM users WHERE role='rep'", conn)['real_name'].tolist()
+            rep_n = st.selectbox("اختر المندوب للعرض:", reps) if reps else rep_n
+        
+        my_data = pd.read_sql("SELECT * FROM customers WHERE sales_rep=?", conn, params=(rep_n,))
+        if not my_data.empty:
+            search_q = st.text_input("🔎 ابحث بالاسم:")
+            df_view = my_data[my_data['company_name'].str.contains(search_q, case=False)]
             
-            df = pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(my_name,))
-            if not df.empty:
-                search_q = st.text_input("🔎 ابحث بالاسم (إكمال تلقائي):")
-                df_f = df[df['company_name'].str.contains(search_q, case=False)]
-                selected_id = st.selectbox("اختر شركة للتعديل:", df_f['id'].tolist(), format_func=lambda x: df_f[df_f['id']==x]['company_name'].values[0])
-                row = df[df['id']==selected_id].iloc[0]
+            if not df_view.empty:
+                selected_id = st.selectbox("👇 اختر العميل:", df_view['id'].tolist(), format_func=lambda x: df_view[df_view['id']==x]['company_name'].values[0])
+                row = my_data[my_data['id'] == selected_id].iloc[0]
                 
-                with st.form("edit_area"):
+                with st.form("status_update_form"):
                     c1, c2 = st.columns(2)
                     with c1:
-                        new_name = st.text_input("اسم الشركة", value=row['company_name'], disabled=(role != 'admin'))
-                        new_mob = st.text_input("الجوال", value=row['mobile'])
-                        st.link_button("💬 واتساب مباشر", f"https://wa.me/{row['mobile'].replace('+', '').replace(' ', '')}")
+                        # المدير يستطيع تعديل البيانات، المندوب يشاهد فقط
+                        new_cname = st.text_input("اسم الشركة", value=row['company_name'], disabled=(role != 'admin'))
+                        new_mob = st.text_input("رقم الجوال", value=row['mobile'], disabled=(role != 'admin'))
+                        st.link_button("💬 مراسلة واتساب", f"https://wa.me/{row['mobile'].replace('+', '').replace(' ', '')}")
+                        new_st = st.selectbox("تحديث الحالة", TRIP_STAGES, index=TRIP_STAGES.index(row['status']) if row['status'] in TRIP_STAGES else 0)
                     with c2:
-                        new_st = st.selectbox("الحالة الحالية", TRIP_STAGES, index=TRIP_STAGES.index(row['status']))
+                        amt = st.number_input("مبلغ التعميد (SAR)", value=float(row.get('contract_amount', 0)) if new_st == "تم التعميد" else 0.0)
                         note = st.text_area("ملاحظات المتابعة")
-                    if st.form_submit_button("حفظ"):
-                        conn.execute("UPDATE customers SET company_name=?, mobile=?, status=? WHERE id=?", (new_name, new_mob, new_st, selected_id))
-                        conn.execute("INSERT INTO status_history (customer_id, customer_name, updated_status, changed_by, notes, timestamp) VALUES (?,?,?,?,?,?)", (selected_id, new_name, new_st, st.session_state['real_name'], note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    
+                    if st.form_submit_button("💾 حفظ التعديلات"):
+                        conn.execute("UPDATE customers SET company_name=?, mobile=?, status=?, contract_amount=? WHERE id=?", (new_cname, new_mob, new_st, amt, selected_id))
+                        conn.execute("INSERT INTO status_history (customer_id, customer_name, updated_status, changed_by, notes, timestamp) VALUES (?,?,?,?,?,?)", 
+                                     (selected_id, new_cname, new_st, st.session_state['real_name'], note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                         conn.commit(); st.success("تم التحديث"); st.rerun()
-            else: st.info("لا توجد بيانات.")
+            else: st.warning("لا توجد نتائج.")
 
     # --- إضافة عميل ---
     elif nav == "إضافة عميل":
         st.header("➕ إضافة عميل")
-        with st.form("add_c"):
+        with st.form("add_client"):
             c1, c2 = st.columns(2)
             with c1:
-                comp, sec = st.text_input("الشركة *"), st.selectbox("القطاع", ["تقنية", "عقارات", "تجارة", "صناعة"])
-                cont, pos = st.text_input("المسؤول"), st.text_input("المنصب")
+                comp = st.text_input("اسم الشركة *")
+                code = st.selectbox("الدولة", list(COUNTRY_CODES.keys()))
             with c2:
-                code = st.selectbox("مفتاح الدولة *", list(COUNTRY_CODES.keys()))
-                mob = st.text_input("الجوال *")
-                em, evt = st.text_input("الإيميل"), st.text_input("الفعالية")
-            rep = st.text_input("المندوب", value=st.session_state['real_name'], disabled=(role != 'admin'))
-            if st.form_submit_button("حفظ"):
-                full_mob = f"+{COUNTRY_CODES[code]}{mob.strip()}"
-                dup = check_duplicate(comp, full_mob)
-                if dup: st.error(dup)
-                elif comp and mob:
-                    conn.execute("INSERT INTO customers (company_name, sector, contact_person, position, mobile, email, event_name, sales_rep) VALUES (?,?,?,?,?,?,?,?)", (comp, sec, cont, pos, full_mob, em, evt, rep))
-                    conn.commit(); st.success("تم الحفظ")
-
-    # --- لوحة المدير (الفلتر والإحصائيات المجمعة) ---
-    elif nav == "لوحة المدير" and role == 'admin':
-        st.header("📊 إحصائيات أداء المناديب")
-        
-        # فلتر التاريخ
-        c_d1, c_d2 = st.columns(2)
-        with c_d1: d_start = st.date_input("من تاريخ", date(2023, 1, 1))
-        with c_d2: d_end = st.date_input("إلى تاريخ", date.today())
-        
-        # جلب البيانات المفلترة من السجل
-        history = pd.read_sql("SELECT * FROM status_history", conn)
-        if not history.empty:
-            history['timestamp'] = pd.to_datetime(history['timestamp'])
-            history = history[(history['timestamp'].dt.date >= d_start) & (history['timestamp'].dt.date <= d_end)]
+                mob = st.text_input("رقم الجوال *")
+                rep = st.text_input("المندوب المسجل", value=st.session_state['real_name'], disabled=(role != 'admin'))
             
-            if not history.empty:
-                # إنشاء الجدول المجمع
-                summary = history.groupby(['changed_by', 'updated_status']).size().unstack(fill_value=0).reset_index()
-                summary.columns.name = None
-                summary.rename(columns={'changed_by': 'اسم المندوب'}, inplace=True)
-                
-                st.subheader("📈 ملخص العمليات لكل مندوب")
-                st.dataframe(summary, use_container_width=True, hide_index=True)
-                
-                # رسم بياني
-                st.plotly_chart(px.bar(history, x='changed_by', color='updated_status', title="توزيع الحالات"), use_container_width=True)
-            else: st.warning("لا توجد عمليات في هذه الفترة.")
+            if st.form_submit_button("تأكيد الحفظ"):
+                full_mob = f"+{COUNTRY_CODES[code]}{mob.strip()}"
+                # منع التكرار
+                dup = conn.execute("SELECT sales_rep, company_name FROM customers WHERE mobile=? OR (company_name=? AND sales_rep=?)", (full_mob, comp, rep)).fetchone()
+                if dup: st.error(f"⚠️ مكرر! العميل مسجل مسبقاً مع المندوب: {dup[0]}")
+                elif comp and mob:
+                    conn.execute("INSERT INTO customers (company_name, mobile, sales_rep) VALUES (?,?,?)", (comp, full_mob, rep))
+                    conn.commit(); st.success("تم الحفظ بنجاح")
+
+    # --- لوحة المدير ---
+    elif nav == "لوحة المدير" and role == 'admin':
+        st.header("📊 إحصائيات الأداء المجمعة")
+        c1, c2 = st.columns(2)
+        with c1: d_start = st.date_input("من تاريخ", date(2025, 1, 1))
+        with c2: d_end = st.date_input("إلى تاريخ", date.today())
         
-    # --- المستخدمين (إدارة كاملة) ---
+        hist_df = pd.read_sql("SELECT * FROM status_history", conn)
+        if not hist_df.empty:
+            hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'])
+            filtered = hist_df[(hist_df['timestamp'].dt.date >= d_start) & (hist_df['timestamp'].dt.date <= d_end)]
+            if not filtered.empty:
+                # 
+                summary = filtered.groupby(['changed_by', 'updated_status']).size().unstack(fill_value=0)
+                st.subheader("📈 ملخص العمليات لكل مندوب")
+                st.dataframe(summary, use_container_width=True)
+                st.plotly_chart(px.bar(filtered, x='changed_by', color='updated_status', barmode='group'))
+            else: st.warning("لا توجد بيانات للفترة المختارة.")
+
+    # --- المستخدمين ---
     elif nav == "المستخدمين" and role == 'admin':
         st.header("👥 إدارة المستخدمين")
-        t1, t2, t3 = st.tabs(["إضافة", "تغيير باسورد", "حذف"])
+        t1, t2, t3 = st.tabs(["إضافة", "تعديل باسورد", "حذف"])
         with t1:
-            n, u, p = st.text_input("الاسم"), st.text_input("اليوزر"), st.text_input("الباسورد")
+            n, u, p = st.text_input("الاسم"), st.text_input("اليوزر"), st.text_input("الباس")
             if st.button("إنشاء"):
                 conn.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (u, p, 'rep', n))
                 conn.commit(); st.success("تم")
         with t2:
             u_list = pd.read_sql("SELECT username FROM users", conn)['username'].tolist()
-            u_sel = st.selectbox("اختر المستخدم", u_list)
-            np = st.text_input("باسورد جديد")
-            if st.button("تحديث"):
-                conn.execute("UPDATE users SET password=? WHERE username=?", (np, u_sel))
-                conn.commit(); st.success("تم")
+            u_sel = st.selectbox("اختر مستخدم", u_list)
+            np = st.text_input("كلمة مرور جديدة")
+            if st.button("تحديث الباسورد"):
+                conn.execute("UPDATE users SET password=? WHERE username=?", (np, u_sel)); conn.commit(); st.success("تم")
         with t3:
             u_del = st.selectbox("حذف مستخدم", [x for x in u_list if x != 'admin'])
-            if st.button("حذف نهائي"):
+            if st.button("تأكيد الحذف"):
                 conn.execute("DELETE FROM users WHERE username=?", (u_del,)); conn.commit(); st.success("تم"); st.rerun()
 
-    # --- استيراد ملف وبحث شامل ---
+    # --- استيراد ملف ---
     elif nav == "استيراد ملف" and role == 'admin':
         st.header("📤 استيراد داتا")
         f = st.file_uploader("اختر ملف", type=['xlsx', 'csv'])
         if f and st.button("بدء الاستيراد"):
             df_in = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
             df_in.to_sql('customers', conn, if_exists='append', index=False)
-            st.success("تم الاستيراد")
+            st.success("تم استيراد الداتا بنجاح")
 
+    # --- بحث شامل ---
     elif nav == "بحث شامل":
-        st.header("🔍 محرك البحث")
-        q = st.text_input("ابحث عن شركة، جوال، أو مندوب:")
+        st.header("🔍 محرك البحث الشامل")
+        q = st.text_input("🔎 ابحث عن أي معلومة (شركة، جوال، مندوب):")
         if q:
-            all_data = pd.read_sql("SELECT * FROM customers", conn)
-            res = all_data[all_data.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
+            all_c = pd.read_sql("SELECT * FROM customers", conn)
+            res = all_c[all_c.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
             st.dataframe(res, use_container_width=True, hide_index=True)
