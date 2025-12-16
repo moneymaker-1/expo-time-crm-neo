@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded" 
 )
 
-# قائمة جميع الدول العربية المضافة حديثاً
+# قائمة جميع الدول العربية المضافة للتحديث
 COUNTRY_CODES = {
     "السعودية (+966)": "966", "الإمارات (+971)": "971", "مصر (+20)": "20",
     "الكويت (+965)": "965", "قطر (+974)": "974", "عمان (+968)": "968",
@@ -44,7 +44,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
         mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد')''')
     
-    # إنشاء جدول السجل (مع عمود notes الضروري)
+    # إنشاء جدول السجل
     c.execute('''CREATE TABLE IF NOT EXISTS status_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, customer_name TEXT, 
         updated_status TEXT, changed_by TEXT, notes TEXT, timestamp TEXT)''')
@@ -53,7 +53,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
     
-    # التأكد من وجود المدير (Admin)
+    # التأكد من وجود المدير
     c.execute("SELECT * FROM users WHERE username = 'admin'")
     if not c.fetchone():
         c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", ('admin', '1234', 'admin', 'المدير العام'))
@@ -63,12 +63,10 @@ def init_db():
 
 conn = init_db()
 SECTORS = ["تقنية", "عقارات", "تجارة تجزئة", "صناعة", "خدمات"]
-
-# --- مراحل رحلة العميل ---
 TRIP_STAGES = ["جديد", "تم الاتصال", "تم الاجتماع", "تم تقديم التصميم", "تم تقديم عرض مالي", "تم التعديل", "تم التعميد", "تم الرفض"]
 
 # ==========================================
-#           دوال التحقق والمنطق
+#           دوال التحقق والذكاء البرمجي
 # ==========================================
 
 def check_duplicate_info(comp_name, mob, em):
@@ -125,14 +123,6 @@ def update_customer_status(cid, cname, new_status, user, notes=""):
               (cid, cname, new_status, user, notes, now))
     conn.commit()
 
-def update_user_password(user, pwd):
-    conn.execute("UPDATE users SET password = ? WHERE username = ?", (pwd, user))
-    conn.commit()
-
-def delete_user(user):
-    conn.execute("DELETE FROM users WHERE username = ?", (user,))
-    conn.commit()
-
 def get_all_users(): return pd.read_sql("SELECT username, role, real_name FROM users", conn)
 def get_all_reps(): return pd.read_sql("SELECT real_name FROM users WHERE role = 'rep'", conn)['real_name'].tolist()
 def get_all_data(): return pd.read_sql("SELECT * FROM customers", conn)
@@ -184,7 +174,6 @@ if not st.session_state['logged_in']:
             else:
                 if create_user(user, pw, user): st.success("تم التسجيل")
                 else: st.error("المستخدم موجود")
-
 else:
     with st.sidebar:
         st.title(f"مرحباً {st.session_state['real_name']}")
@@ -203,7 +192,7 @@ else:
                 rep_name = st.selectbox("اختر المندوب:", reps) if reps else rep_name
             my_data = get_my_data(rep_name)
             if not my_data.empty:
-                search_q = st.text_input("🔎 ابحث (الإكمال التلقائي مفعل):", key="search_my")
+                search_q = st.text_input("🔎 ابحث (اسم، جوال...):", key="search_my")
                 df_view = my_data[my_data.astype(str).apply(lambda x: x.str.contains(search_q, case=False)).any(axis=1)] if search_q else my_data
                 client_options = {row['id']: f"{row['company_name']} - {row['mobile']}" for i, row in df_view.iterrows()}
                 if client_options:
@@ -237,11 +226,9 @@ else:
                 comp, sec = st.text_input("اسم الشركة *"), st.selectbox("القطاع", SECTORS)
                 cont, pos = st.text_input("الشخص المسؤول"), st.text_input("المنصب")
             with col2:
-                # تحديث: قائمة منسدلة لمفتاح الدولة والجوال في نفس السطر
                 c_key = st.selectbox("مفتاح الدولة *", list(COUNTRY_CODES.keys()))
-                mob_in = st.text_input("رقم الجوال (بدون مفتاح الدولة) *")
+                mob_in = st.text_input("رقم الجوال *")
                 em = st.text_input("الإيميل *")
-            
             rep = st.selectbox("المندوب", get_all_reps()) if role == 'admin' else st.text_input("المندوب", value=st.session_state['real_name'], disabled=True)
             
             if st.form_submit_button("حفظ"):
@@ -252,7 +239,7 @@ else:
                 elif comp and is_valid_mob and validate_email(em):
                     add_customer((comp, sec, cont, pos, full_mob, em, "يدوي", rep, "جديد"))
                     st.success("تم الحفظ بنجاح!")
-                else: st.error("تأكد من البيانات وصحة رقم الجوال لهذه الدولة")
+                else: st.error("تأكد من البيانات وصحة الجوال")
 
     elif nav == "استيراد ملف" and role == 'admin':
         st.header("📤 استيراد Excel/CSV")
@@ -284,10 +271,10 @@ else:
         users = get_all_users()
         with t2:
             u_sel, np = st.selectbox("المستخدم", users['username']), st.text_input("كلمة مرور جديدة")
-            if st.button("تحديث"): update_user_password(u_sel, np); st.success("تم")
+            if st.button("تحديث"): conn.execute("UPDATE users SET password=? WHERE username=?", (np, u_sel)); conn.commit(); st.success("تم")
         with t3:
             u_del = st.selectbox("حذف مستخدم", users[users['username']!='admin']['username'])
-            if st.button("حذف"): delete_user(u_del); st.success("تم"); st.rerun()
+            if st.button("حذف"): conn.execute("DELETE FROM users WHERE username=?", (u_del,)); conn.commit(); st.success("تم"); st.rerun()
 
     elif nav == "بحث شامل":
         st.header("🔍 بحث شامل")
