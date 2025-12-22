@@ -61,8 +61,9 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
     
+    # جدول الفعاليات
     c.execute('''CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT, event_date DATE, location TEXT, assigned_rep TEXT)''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT, event_date TEXT, location TEXT, assigned_rep TEXT)''')
     
     c.execute("SELECT * FROM users WHERE username = 'admin'")
     if not c.fetchone():
@@ -122,7 +123,8 @@ def add_new_event(name, date, location):
     conn.commit()
 
 def get_all_events():
-    return pd.read_sql("SELECT * FROM events ORDER BY event_date", conn)
+    # تعديل لجلب الفعاليات كنص في حال كان التاريخ نصاً
+    return pd.read_sql("SELECT * FROM events", conn)
 
 def assign_event_to_rep(event_id, rep_name):
     c = conn.cursor()
@@ -221,18 +223,23 @@ def bulk_import_clients(df, reps):
 def bulk_import_events(df):
     count = 0
     df.columns = [str(c).lower().strip() for c in df.columns]
+    
+    # تحديث الخريطة لتقبل ملفك (events.csv)
     column_map = {
         'event_name': 'event_name', 'اسم الفعالية': 'event_name', 'الفعالية': 'event_name',
         'date': 'event_date', 'التاريخ': 'event_date', 'event_date': 'event_date',
-        'location': 'location', 'المكان': 'location', 'المدينة': 'location'
+        'location': 'location', 'المكان': 'location', 'المدينة': 'location', 'المكان / القاعة': 'location'
     }
     df = df.rename(columns=column_map)
+    
     for _, row in df.iterrows():
         name = row.get('event_name')
         date_val = row.get('event_date')
         loc = row.get('location')
-        if name and date_val:
-            add_new_event(str(name), str(date_val), str(loc))
+        
+        # التأكد من وجود البيانات الأساسية
+        if pd.notna(name) and pd.notna(date_val):
+            add_new_event(str(name), str(date_val), str(loc) if pd.notna(loc) else "")
             count += 1
     return count
 
@@ -314,21 +321,28 @@ else:
                 else: st.warning("لا يوجد سجل متابعات مسجل لهذا المندوب حتى الآن.")
             else: st.warning("لا يوجد عملاء مسندين لهذا المندوب.")
 
+    # ==========================
+    #      قسم الفعاليات
+    # ==========================
     elif nav == "الفعاليات":
         st.header("📅 إدارة الفعاليات القادمة")
+        
+        # إضافة فعالية يدوية للمدير
         if role == 'admin':
-            with st.expander("➕ إضافة فعالية جديدة"):
+            with st.expander("➕ إضافة فعالية يدوياً"):
                 with st.form("add_event_form"):
                     e_name = st.text_input("اسم الفعالية")
-                    e_date = st.date_input("تاريخ الفعالية")
+                    e_date = st.text_input("تاريخ الفعالية (مثال: 2025-10-10)")
                     e_loc = st.text_input("المكان / المدينة")
                     if st.form_submit_button("حفظ الفعالية"):
                         add_new_event(e_name, e_date, e_loc)
                         st.success("تمت الإضافة بنجاح!")
                         st.rerun()
+        
         st.divider()
         st.subheader("📌 قائمة الفعاليات المتاحة")
         events = get_all_events()
+        
         if not events.empty:
             for index, event in events.iterrows():
                 is_taken = event['assigned_rep'] != 'غير محدد'
