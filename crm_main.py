@@ -1,9 +1,9 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import plotly.express as px
+import re
+import quopri 
 from datetime import datetime, date
-import re 
 
 # ==========================================
 #             إعدادات النظام والدول
@@ -43,10 +43,18 @@ if 'real_name' not in st.session_state:
 def init_db():
     conn = sqlite3.connect('company_crm.db', check_same_thread=False)
     c = conn.cursor()
+    
+    # جدول العملاء (تم إضافة عمود created_at لتتبع تاريخ الإضافة)
     c.execute('''CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
-        mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد')''')
+        mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد', created_at DATE)''')
     
+    # محاولة إضافة عمود created_at إذا كان الجدول موجوداً قديماً
+    try:
+        c.execute("ALTER TABLE customers ADD COLUMN created_at DATE")
+    except:
+        pass
+
     c.execute('''CREATE TABLE IF NOT EXISTS status_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, customer_name TEXT, 
         updated_status TEXT, changed_by TEXT, notes TEXT, timestamp TEXT)''')
@@ -54,7 +62,9 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
     
-    # إنشاء حساب المدير الافتراضي إذا لم يوجد
+    c.execute('''CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT, event_date DATE, location TEXT, assigned_rep TEXT)''')
+    
     c.execute("SELECT * FROM users WHERE username = 'admin'")
     if not c.fetchone():
         c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", ('admin', '1234', 'admin', 'المدير العام'))
@@ -64,7 +74,7 @@ def init_db():
 
 conn = init_db()
 
-SECTORS = ["تقنية", "عقارات", "تجارة تجزئة", "صناعة", "خدمات", "مقاولات", "أغذية", "طبية", "سياحة", "تعليم"]
+SECTORS = ["تقنية", "عقارات", "تجارة تجزئة", "صناعة", "خدمات", "مقاولات", "أغذية", "طبية", "سياحة", "تعليم", "عام"]
 TRIP_STAGES = ["جديد", "تم الاتصال", "تم الاجتماع", "تم تقديم التصميم", "تم تقديم عرض مالي", "تم التعديل", "تم التعميد", "تم الرفض", "مؤجل"]
 
 # ==========================================
@@ -106,6 +116,20 @@ def delete_user(user):
     conn.execute("DELETE FROM users WHERE username = ?", (user,))
     conn.commit()
 
+def add_new_event(name, date, location):
+    c = conn.cursor()
+    c.execute("INSERT INTO events (event_name, event_date, location, assigned_rep) VALUES (?, ?, ?, ?)", 
+              (name, date, location, 'غير محدد'))
+    conn.commit()
+
+def get_all_events():
+    return pd.read_sql("SELECT * FROM events ORDER BY event_date", conn)
+
+def assign_event_to_rep(event_id, rep_name):
+    c = conn.cursor()
+    c.execute("UPDATE events SET assigned_rep = ? WHERE id = ?", (rep_name, event_id))
+    conn.commit()
+
 def get_all_users(): return pd.read_sql("SELECT username, role, real_name FROM users", conn)
 def get_all_reps(): return pd.read_sql("SELECT real_name FROM users WHERE role = 'rep'", conn)['real_name'].tolist()
 def get_all_data(): return pd.read_sql("SELECT * FROM customers", conn)
@@ -115,65 +139,93 @@ def get_history_log(): return pd.read_sql("SELECT * FROM status_history ORDER BY
 
 def add_customer(data):
     c = conn.cursor()
-    # التحقق من التكرار برقم الجوال أو اسم الشركة
     c.execute("SELECT sales_rep FROM customers WHERE mobile = ? OR company_name = ?", (data[4], data[0]))
     exists = c.fetchone()
-    if exists:
-        st.error(f"⚠️ العميل مكرر وموجود مسبقاً مع المندوب: {exists[0]}")
-        return False
-    c.execute('''INSERT INTO customers (company_name, sector, contact_person, position, mobile, email, event_name, sales_rep, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
+    if exists: return False
+    # إضافة التاريخ الحالي عند الإضافة
+    today = date.today()
+    # نقوم بتوسيع البيانات لتشمل التاريخ
+    data_with_date = data + (today,)
+    c.execute('''INSERT INTO customers (company_name, sector, contact_person, position, mobile, email, event_name, sales_rep, status, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data_with_date)
     conn.commit()
     return True
 
+# --- دوال التقارير ---
+def generate_rep_report(rep_name):
+    # جلب جميع عملاء المندوب
+    c = conn.cursor()
+    customers = pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(rep_name,))
+    
+    if customers.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    
+    # تنظيف وتنسيق تواريخ الإضافة
+    customers['created_at'] = pd.to_datetime(customers['created_at'], errors='coerce').dt.date
+    
+    # جلب سجل التفاعلات لهذا المندوب
+    history = pd.read_sql("SELECT * FROM status_history WHERE changed_by = ?", conn, params=(rep_name,))
+    history['timestamp'] = pd.to_datetime(history['timestamp'])
+    
+    return customers, history
+
+# --- معالجة VCF ---
+def parse_vcf_content(content):
+    contacts_list = []
+    cards = content.split(b'BEGIN:VCARD')
+    for card in cards:
+        if not card.strip(): continue
+        try: card_str = card.decode('utf-8', errors='ignore')
+        except: continue
+        if '=D' in card_str or 'ENCODING=QUOTED-PRINTABLE' in card_str:
+            try: card_decoded = quopri.decodestring(card).decode('utf-8', errors='ignore')
+            except: card_decoded = card_str
+        else: card_decoded = card_str
+        fn_match = re.search(r'FN(?:;.*)?:(.*)', card_decoded)
+        name = fn_match.group(1).replace(';', ' ').strip() if fn_match else ""
+        org_match = re.search(r'ORG(?:;.*)?:(.*)', card_decoded)
+        company = org_match.group(1).replace(';', ' ').strip() if org_match else ""
+        email_match = re.search(r'EMAIL(?:;.*)?:(.*)', card_decoded)
+        email = email_match.group(1).strip() if email_match else ""
+        tel_matches = re.findall(r'TEL(?:;.*)?:([+\d\s-]+)', card_decoded)
+        if tel_matches:
+            for tel in tel_matches:
+                mob = re.sub(r'[^\d]', '', str(tel))
+                if len(mob) < 5: continue
+                if mob.startswith('00'): mob = mob[2:]
+                if mob.startswith('05'): mob = '966' + mob[1:]
+                final_comp = company if company else name
+                if not final_comp: final_comp = "عميل غير معروف"
+                contacts_list.append({
+                    'company_name': final_comp, 'sector': 'عام', 'contact_person': name, 'position': '', 
+                    'mobile': mob, 'email': email, 'event_name': 'استيراد VCF', 'sales_rep': 'غير معين'
+                })
+    return pd.DataFrame(contacts_list).drop_duplicates(subset=['mobile'])
+
 def bulk_import(df, reps):
     count = 0
-    # توحيد أسماء الأعمدة لتجنب المشاكل
     df.columns = [str(c).lower().strip() for c in df.columns]
-    
-    # رسم خرائط للأعمدة المتوقعة
     column_map = {
         'company_name': 'company_name', 'اسم الشركة': 'company_name',
         'sector': 'sector', 'القطاع': 'sector',
-        'contact_person': 'contact_person', 'المسؤول': 'contact_person', 'contact': 'contact_person',
-        'position': 'position', 'المنصب': 'position',
-        'mobile': 'mobile', 'الجوال': 'mobile', 'phone': 'mobile', 'رقم الهاتف': 'mobile',
-        'email': 'email', 'البريد': 'email', 'الايميل': 'email',
-        'event_name': 'event_name', 'الفعالية': 'event_name', 'event': 'event_name',
-        'sales_rep': 'sales_rep', 'المندوب': 'sales_rep', 'rep': 'sales_rep'
+        'contact_person': 'contact_person', 'المسؤول': 'contact_person',
+        'mobile': 'mobile', 'الجوال': 'mobile', 'phone': 'mobile',
+        'email': 'email', 'البريد': 'email',
+        'event_name': 'event_name', 'الفعالية': 'event_name',
+        'sales_rep': 'sales_rep', 'المندوب': 'sales_rep'
     }
-    
-    # إعادة تسمية الأعمدة في الداتا فريم
     df = df.rename(columns=column_map)
-    
     for _, row in df.iterrows():
         rep = row.get('sales_rep', 'غير معين')
-        # إذا كان المندوب فارغاً أو غير موجود
         if pd.isna(rep) or str(rep).strip() == "": rep = 'غير معين'
-        
-        # تجهيز البيانات
         comp = row.get('company_name', '')
-        if pd.isna(comp): continue # تخطي الصفوف الفارغة
-        
+        if pd.isna(comp): continue
         mob = str(row.get('mobile', ''))
-        # تنظيف بسيط للجوال
         if mob.endswith('.0'): mob = mob[:-2]
-        
-        data = (
-            str(comp).strip(),
-            str(row.get('sector', 'عام')),
-            str(row.get('contact_person', '')),
-            str(row.get('position', '')), 
-            mob,
-            str(row.get('email', '')),
-            str(row.get('event_name', '')),
-            str(rep).strip(),
-            "جديد"
-        )
-        
-        if data[0]: # إذا وجد اسم شركة
-            if add_customer(data):
-                count += 1
+        data = (str(comp).strip(), str(row.get('sector', 'عام')), str(row.get('contact_person', '')), str(row.get('position', '')), 
+                mob, str(row.get('email', '')), str(row.get('event_name', '')), str(rep).strip(), "جديد")
+        if data[0] and len(mob) > 5:
+            if add_customer(data): count += 1
     return count
 
 # ==========================================
@@ -183,7 +235,7 @@ def bulk_import(df, reps):
 if not st.session_state['logged_in']:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        st.title("🔐 Expo Time CRM")
+        st.title("🔐 Expotime CRM")
         choice = st.selectbox("القائمة", ["تسجيل دخول", "تسجيل مندوب جديد"])
         if choice == "تسجيل دخول":
             user = st.text_input("اسم المستخدم")
@@ -203,62 +255,136 @@ if not st.session_state['logged_in']:
                 else: st.error("المستخدم موجود مسبقاً")
 else:
     role = st.session_state['user_role']
+    real_name = st.session_state['real_name']
+    
     with st.sidebar:
-        st.title(f"مرحباً {st.session_state['real_name']}")
+        st.title(f"مرحباً {real_name}")
         if role == 'admin':
-            menu = ["لوحة المدير", "المستخدمين", "استيراد ملف", "بوابة المبيعات", "إضافة عميل", "بحث شامل", "خروج"]
+            menu = ["لوحة المدير", "التقارير", "الفعاليات", "المستخدمين", "استيراد ملف", "بوابة المبيعات", "إضافة عميل", "بحث شامل", "خروج"]
         else:
-            menu = ["بوابة المبيعات", "إضافة عميل", "خروج"]
+            menu = ["بوابة المبيعات", "التقارير", "الفعاليات", "إضافة عميل", "خروج"]
         nav = st.radio("التنقل", menu)
-
-    # ------------------------------------------------------------------
-    #                           منطق التنقل
-    # ------------------------------------------------------------------
 
     if nav == "خروج":
         st.session_state.clear()
         st.rerun()
 
+    # ==========================
+    #      قسم التقارير (الجديد)
+    # ==========================
+    elif nav == "التقارير":
+        st.header("📑 تقارير الأداء المفصلة")
+        
+        # اختيار المندوب (للمدير الخيار، وللمندوب نفسه فقط)
+        if role == 'admin':
+            reps_list = get_all_reps()
+            selected_rep = st.selectbox("اختر المندوب لاستخراج التقرير:", reps_list)
+        else:
+            selected_rep = real_name
+            st.info(f"تقرير الأداء الخاص بـ: {selected_rep}")
+
+        if selected_rep:
+            customers_df, history_df = generate_rep_report(selected_rep)
+            
+            if not customers_df.empty:
+                # 1. إحصائيات عامة
+                st.subheader("📊 ملخص الأداء")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("إجمالي العملاء المسندين", len(customers_df))
+                
+                # حساب العملاء المضافين هذا الشهر
+                current_month = datetime.now().month
+                this_month_customers = customers_df[pd.to_datetime(customers_df['created_at']).dt.month == current_month]
+                c2.metric("عملاء جدد (هذا الشهر)", len(this_month_customers))
+                
+                # أكثر حالة تكراراً
+                top_status = customers_df['status'].mode()[0] if not customers_df.empty else "لا يوجد"
+                c3.metric("الحالة الأكثر شيوعاً", top_status)
+
+                st.divider()
+
+                # 2. تفاصيل العملاء وحالاتهم
+                st.subheader("📋 تفاصيل العملاء والحالة الحالية")
+                st.dataframe(customers_df[['company_name', 'mobile', 'status', 'created_at', 'event_name']], use_container_width=True)
+                
+                # زر تصدير للعملاء
+                csv_cust = customers_df.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 تحميل قائمة العملاء (Excel/CSV)", data=csv_cust, file_name=f"Customers_{selected_rep}.csv", mime="text/csv")
+
+                st.divider()
+
+                # 3. سجل الحركات (ماذا حدث مع كل عميل)
+                st.subheader("📝 سجل المتابعات والتحديثات")
+                if not history_df.empty:
+                    # عرض آخر 50 عملية فقط لتحسين الأداء
+                    st.dataframe(history_df[['customer_name', 'updated_status', 'notes', 'timestamp']], use_container_width=True)
+                    
+                    # زر تصدير للسجل
+                    csv_hist = history_df.to_csv(index=False).encode('utf-8')
+                    st.download_button("📥 تحميل سجل المتابعات كامل (Excel/CSV)", data=csv_hist, file_name=f"History_{selected_rep}.csv", mime="text/csv")
+                else:
+                    st.warning("لا يوجد سجل متابعات مسجل لهذا المندوب حتى الآن.")
+
+            else:
+                st.warning("لا يوجد عملاء مسندين لهذا المندوب.")
+
+    elif nav == "الفعاليات":
+        st.header("📅 إدارة الفعاليات القادمة")
+        if role == 'admin':
+            with st.expander("➕ إضافة فعالية جديدة"):
+                with st.form("add_event_form"):
+                    e_name = st.text_input("اسم الفعالية")
+                    e_date = st.date_input("تاريخ الفعالية")
+                    e_loc = st.text_input("المكان / المدينة")
+                    if st.form_submit_button("حفظ الفعالية"):
+                        add_new_event(e_name, e_date, e_loc)
+                        st.success("تمت الإضافة بنجاح!")
+                        st.rerun()
+        st.divider()
+        st.subheader("📌 قائمة الفعاليات المتاحة")
+        events = get_all_events()
+        if not events.empty:
+            for index, event in events.iterrows():
+                is_taken = event['assigned_rep'] != 'غير محدد'
+                with st.container():
+                    c1, c2, c3 = st.columns([2, 2, 1.5])
+                    with c1:
+                        st.markdown(f"### 🎉 {event['event_name']}")
+                        st.caption(f"📅 {event['event_date']} | 📍 {event['location']}")
+                    with c2:
+                        if is_taken:
+                            st.markdown(f"🔒 **المسؤول:** :red[{event['assigned_rep']}]")
+                            if event['assigned_rep'] == st.session_state['real_name']:
+                                st.success("✅ هذه الفعالية بعهدتك")
+                        else: st.markdown("🟢 **متاحة للاستلام**")
+                    with c3:
+                        if not is_taken:
+                            if st.button("✋ استلام الفعالية", key=f"evt_{event['id']}"):
+                                assign_event_to_rep(event['id'], st.session_state['real_name'])
+                                st.toast(f"مبروك! أصبحت مسؤولاً عن {event['event_name']}")
+                                st.rerun()
+                    st.divider()
+        else: st.info("لا توجد فعاليات قادمة مسجلة حالياً.")
+
     elif nav == "بوابة المبيعات":
         st.header("💼 إدارة رحلة العملاء")
         rep_name = st.session_state['real_name']
-        
         if role == 'admin':
             reps = get_all_reps()
-            if reps:
-                col_r1, col_r2 = st.columns([1, 2])
-                with col_r1:
-                    rep_name = st.selectbox("اختر المندوب للعرض:", reps)
-        
+            if reps: rep_name = st.selectbox("اختر المندوب للعرض:", reps)
         my_data = get_my_data(rep_name)
-        
         if not my_data.empty:
             search_q = st.text_input("🔎 ابحث بالاسم:")
-            # فلترة البيانات
             df_view = my_data[my_data['company_name'].astype(str).str.contains(search_q, case=False)]
-            
             if not df_view.empty:
-                # اختيار العميل
-                selected_id = st.selectbox(
-                    "👇 اختر العميل:", 
-                    df_view['id'].tolist(), 
-                    format_func=lambda x: df_view[df_view['id']==x]['company_name'].values[0]
-                )
-                
-                # جلب بيانات العميل المختار
+                selected_id = st.selectbox("👇 اختر العميل:", df_view['id'].tolist(), format_func=lambda x: df_view[df_view['id']==x]['company_name'].values[0])
                 row = df_view[df_view['id'] == selected_id].iloc[0]
-                
                 st.markdown("---")
                 col1, col2 = st.columns([1, 1.5])
-                
-                # --- العمود الأول: المعلومات الأساسية ---
                 with col1:
                     st.subheader("📋 بيانات العميل")
-                    # زر واتساب
                     clean_mob = re.sub(r'\D', '', str(row['mobile']))
                     st.link_button("💬 واتساب فوراً", f"https://wa.me/{clean_mob}")
-                    
-                    # نموذج تعديل البيانات (مع مفتاح فريد)
                     with st.form(key=f"update_info_{selected_id}"):
                         new_name = st.text_input("اسم الشركة", value=row['company_name'], disabled=(role != 'admin'))
                         new_mob = st.text_input("الجوال", value=row['mobile'])
@@ -267,47 +393,28 @@ else:
                             update_customer_info(selected_id, new_name, new_mob, new_email)
                             st.success("تم التعديل!")
                             st.rerun()
-
-                # --- العمود الثاني: رحلة العميل ---
                 with col2:
-                    st.subheader("🚀 تحديث الحالة (الرحلة)")
-                    
-                    # معالجة الحالة الحالية
+                    st.subheader("🚀 تحديث الحالة")
                     current_status = row['status']
-                    if current_status not in TRIP_STAGES:
-                        st.warning(f"الحالة الحالية '{current_status}' غير قياسية. سيتم اعتبارها 'جديد'.")
-                        current_index = 0
-                    else:
-                        current_index = TRIP_STAGES.index(current_status)
-
-                    # نموذج تحديث الحالة (مع مفتاح فريد)
+                    idx = TRIP_STAGES.index(current_status) if current_status in TRIP_STAGES else 0
                     with st.form(key=f"status_up_{selected_id}"):
-                        new_st = st.selectbox("الحالة الجديدة", TRIP_STAGES, index=current_index)
-                        note = st.text_area("ملاحظات المتابعة", placeholder="اكتب تفاصيل الاجتماع أو الاتصال...")
-                        
+                        new_st = st.selectbox("الحالة الجديدة", TRIP_STAGES, index=idx)
+                        note = st.text_area("ملاحظات المتابعة")
                         if st.form_submit_button("حفظ التحديث"):
                             update_customer_status(selected_id, row['company_name'], new_st, st.session_state['real_name'], note)
                             st.toast("✅ تم تحديث الرحلة!")
                             st.rerun()
-
                     st.markdown("### 🕒 سجل المتابعات")
                     history = get_client_history(selected_id)
-                    
                     if not history.empty:
                         with st.container(height=300):
                             for _, h in history.iterrows():
-                                st.markdown(f"""
-                                **{h['updated_status']}** <span style='color:grey; font-size:0.8em;'>👤 {h['changed_by']} | 📅 {h['timestamp']}</span>
-                                """, unsafe_allow_html=True)
-                                if h['notes']:
-                                    st.info(f"{h['notes']}")
+                                st.markdown(f"**{h['updated_status']}** | 👤 {h['changed_by']} | 📅 {h['timestamp']}")
+                                if h['notes']: st.info(h['notes'])
                                 st.divider()
-                    else:
-                        st.info("لا يوجد سجل متابعات بعد.")
-            else:
-                st.warning("لا يوجد عملاء مطابقين للبحث.")
-        else:
-            st.info("لا توجد بيانات لهذا المندوب.")
+                    else: st.info("لا يوجد سجل متابعات بعد.")
+            else: st.warning("لا يوجد نتائج.")
+        else: st.info("لا توجد بيانات لهذا المندوب.")
 
     elif nav == "إضافة عميل":
         st.header("➕ إضافة عميل")
@@ -323,82 +430,82 @@ else:
                 mob = st.text_input("الجوال *")
                 em = st.text_input("الإيميل")
                 evt = st.text_input("الفعالية المهتم بها")
-            
             rep = st.text_input("المندوب", value=st.session_state['real_name'], disabled=(role != 'admin'))
-            
-            if st.form_submit_button("حفظ العميل"):
+            if st.form_submit_button("حفظ"):
                 full_mob = f"+{COUNTRY_CODES[code]}{mob.strip()}"
                 if comp and mob:
                     if add_customer((comp, sec, cont, pos, full_mob, em, evt, rep, "جديد")):
-                        st.success("تم إضافة العميل بنجاح!")
-                else:
-                    st.error("الرجاء تعبئة اسم الشركة والجوال.")
+                        st.success("تمت الإضافة!")
+                else: st.error("البيانات ناقصة")
 
     elif nav == "لوحة المدير" and role == 'admin':
         st.header("📊 إحصائيات النظام")
-        
         all_data = get_all_data()
-        total_customers = len(all_data)
-        
         col1, col2, col3 = st.columns(3)
-        col1.metric("إجمالي العملاء", total_customers)
-        col2.metric("عدد المناديب", len(get_all_reps()))
+        col1.metric("العملاء", len(all_data))
+        col2.metric("المناديب", len(get_all_reps()))
         col3.metric("المستخدمين", len(get_all_users()))
-        
         st.divider()
-        st.subheader("📈 أداء المناديب (حسب الحالات)")
-        
-        d1 = st.date_input("من تاريخ", date(2025, 1, 1))
-        d2 = st.date_input("إلى تاريخ", date.today())
-        
         hist = get_history_log()
         if not hist.empty:
-            hist['timestamp'] = pd.to_datetime(hist['timestamp'])
-            filt = hist[(hist['timestamp'].dt.date >= d1) & (hist['timestamp'].dt.date <= d2)]
-            
-            if not filt.empty:
-                summary = filt.groupby(['changed_by', 'updated_status']).size().unstack(fill_value=0)
-                st.dataframe(summary, use_container_width=True)
-                
-                # رسم بياني بسيط
-                st.bar_chart(summary)
-            else:
-                st.warning("لا توجد عمليات في هذه الفترة.")
+            st.subheader("📈 النشاط الأخير")
+            st.dataframe(hist.head(10), use_container_width=True)
 
     elif nav == "المستخدمين" and role == 'admin':
         st.header("👥 إدارة المستخدمين")
         t1, t2, t3 = st.tabs(["إضافة", "تعديل", "حذف"])
         with t1:
-            n = st.text_input("الاسم الحقيقي")
-            u = st.text_input("اسم المستخدم للدخول")
-            p = st.text_input("كلمة المرور")
-            if st.button("حفظ المستخدم"): 
-                if create_user(u,p,n): st.success("تم!")
+            n, u, p = st.text_input("الاسم"), st.text_input("يوزر"), st.text_input("باسورد")
+            if st.button("حفظ"): create_user(u,p,n); st.success("تم")
         with t2:
-            u_sel = st.selectbox("اختر المستخدم", pd.read_sql("SELECT username FROM users", conn)['username'].tolist())
+            u_sel = st.selectbox("المستخدم", pd.read_sql("SELECT username FROM users", conn)['username'].tolist())
             np = st.text_input("كلمة المرور الجديدة")
-            if st.button("تحديث كلمة المرور"): update_user_password(u_sel, np); st.success("تم!")
+            if st.button("تحديث"): update_user_password(u_sel, np); st.success("تم")
         with t3:
-            u_del = st.selectbox("حذف مستخدم", [x for x in pd.read_sql("SELECT username FROM users", conn)['username'].tolist() if x != 'admin'])
-            if st.button("تأكيد الحذف النهائي"): delete_user(u_del); st.rerun()
+            u_del = st.selectbox("حذف", [x for x in pd.read_sql("SELECT username FROM users", conn)['username'].tolist() if x != 'admin'])
+            if st.button("حذف نهائي"): delete_user(u_del); st.rerun()
 
     elif nav == "استيراد ملف" and role == 'admin':
-        st.header("📤 استيراد العملاء (Excel/CSV)")
-        st.info("تأكد أن الملف يحتوي على أعمدة: company_name, mobile, sales_rep")
-        f = st.file_uploader("اختر الملف", type=['xlsx', 'csv'])
+        st.header("📤 استيراد العملاء")
+        st.info("يدعم ملفات Excel, CSV وأيضاً جهات الاتصال VCF مباشرة!")
+        f = st.file_uploader("اختر الملف", type=['xlsx', 'csv', 'vcf'])
         if f and st.button("بدء الاستيراد"):
             try:
-                df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
+                if f.name.endswith('.vcf'):
+                    df = parse_vcf_content(f.read())
+                    st.write(f"تم قراءة {len(df)} جهة اتصال من ملف VCF. جاري الحفظ...")
+                else:
+                    df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
                 num = bulk_import(df, get_all_reps())
-                st.success(f"تم استيراد {num} عميل بنجاح!")
+                st.success(f"✅ تم استيراد وتخزين {num} عميل بنجاح!")
             except Exception as e:
-                st.error(f"حدث خطأ في الملف: {e}")
+                st.error(f"حدث خطأ: {e}")
 
     elif nav == "بحث شامل":
-        st.header("🔍 بحث في كل الداتا")
-        q = st.text_input("اكتب اسم الشركة، الرقم، أو المندوب:")
+        st.header("🔍 بحث شامل + استحواذ العملاء")
+        q = st.text_input("بحث بالاسم، الرقم، أو المندوب:")
         if q:
             all_c = get_all_data()
-            # البحث في جميع الأعمدة
             res = all_c[all_c.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
-            st.dataframe(res, use_container_width=True)
+            if not res.empty:
+                for index, row in res.iterrows():
+                    is_assigned = (row['sales_rep'] != 'غير معين') and (row['sales_rep'] is not None) and (str(row['sales_rep']).strip() != '')
+                    with st.container():
+                        c1, c2, c3 = st.columns([2, 2, 1])
+                        with c1:
+                            st.markdown(f"**🏢 {row['company_name']}**")
+                            st.caption(f"📱 {row['mobile']}")
+                        with c2:
+                            if is_assigned:
+                                st.markdown(f"🔒 **محجوز:** :red[{row['sales_rep']}]")
+                            else: st.markdown("🔓 **متاح**")
+                        with c3:
+                            if not is_assigned:
+                                if st.button("➕ لي", key=f"clm_{row['id']}"):
+                                    c = conn.cursor()
+                                    c.execute("UPDATE customers SET sales_rep = ? WHERE id = ?", (st.session_state['real_name'], row['id']))
+                                    conn.commit()
+                                    st.toast("تمت الإضافة لقائمتك!")
+                                    st.rerun()
+                        st.divider()
+            else: st.info("لا توجد نتائج")
