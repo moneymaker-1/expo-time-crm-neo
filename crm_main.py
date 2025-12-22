@@ -61,7 +61,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
     
-    # جدول الفعاليات (تم تغيير نوع التاريخ إلى TEXT ليقبل الصيغ المعقدة في ملفك)
+    # جدول الفعاليات
     c.execute('''CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT, event_date TEXT, location TEXT, assigned_rep TEXT)''')
     
@@ -226,10 +226,8 @@ def bulk_import_clients(df, reps):
 
 def bulk_import_events(df):
     count = 0
-    # تنظيف أسماء الأعمدة من المسافات
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [str(c).lower().strip() for c in df.columns]
     
-    # خريطة دقيقة جداً بناءً على ملفك events.csv
     column_map = {}
     for col in df.columns:
         if 'اسم الفعالية' in col or 'event_name' in col:
@@ -247,7 +245,6 @@ def bulk_import_events(df):
         loc = row.get('location')
         
         if pd.notna(name) and pd.notna(date_val):
-            # تحويل القيم لنصوص لتجنب مشاكل التواريخ المعقدة
             if add_new_event(str(name).strip(), str(date_val).strip(), str(loc).strip() if pd.notna(loc) else ""):
                 count += 1
     return count
@@ -496,13 +493,19 @@ else:
                     if f.name.endswith('.vcf'):
                         st.error("عفواً، لا يمكن استيراد الفعاليات من ملف VCF.")
                     else:
-                        # تحسين: قراءة CSV مع التشفير العربي (utf-8-sig)
+                        # حل مشكلة التشفير في ملفات CSV (عربي/إنجليزي/Windows)
                         if f.name.endswith('.csv'):
-                            try:
-                                df = pd.read_csv(f, encoding='utf-8')
-                            except UnicodeDecodeError:
-                                f.seek(0)
-                                df = pd.read_csv(f, encoding='utf-8-sig')
+                            encodings_to_try = ['utf-8', 'utf-8-sig', 'cp1256', 'iso-8859-1']
+                            for enc in encodings_to_try:
+                                try:
+                                    f.seek(0)
+                                    df = pd.read_csv(f, encoding=enc)
+                                    break
+                                except UnicodeDecodeError:
+                                    continue
+                            else:
+                                st.error("فشل قراءة الملف! يرجى حفظه بصيغة CSV UTF-8")
+                                st.stop()
                         else:
                             df = pd.read_excel(f)
 
