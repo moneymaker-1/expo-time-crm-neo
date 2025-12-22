@@ -44,12 +44,15 @@ def init_db():
     conn = sqlite3.connect('company_crm.db', check_same_thread=False)
     c = conn.cursor()
     
+    # جدول العملاء
     c.execute('''CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
         mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد', created_at DATE)''')
+    
     try:
         c.execute("ALTER TABLE customers ADD COLUMN created_at DATE")
-    except: pass
+    except:
+        pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS status_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, customer_name TEXT, 
@@ -58,6 +61,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
     
+    # جدول الفعاليات
     c.execute('''CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT, event_date TEXT, location TEXT, assigned_rep TEXT)''')
     
@@ -114,6 +118,7 @@ def delete_user(user):
 
 def add_new_event(name, date, location):
     c = conn.cursor()
+    # التحقق من عدم التكرار
     c.execute("SELECT id FROM events WHERE event_name = ?", (name,))
     if not c.fetchone():
         c.execute("INSERT INTO events (event_name, event_date, location, assigned_rep) VALUES (?, ?, ?, ?)", 
@@ -153,7 +158,8 @@ def add_customer(data):
 def generate_rep_report(rep_name):
     c = conn.cursor()
     customers = pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(rep_name,))
-    if customers.empty: return pd.DataFrame(), pd.DataFrame()
+    if customers.empty:
+        return pd.DataFrame(), pd.DataFrame()
     customers['created_at'] = pd.to_datetime(customers['created_at'], errors='coerce').dt.date
     history = pd.read_sql("SELECT * FROM status_history WHERE changed_by = ?", conn, params=(rep_name,))
     history['timestamp'] = pd.to_datetime(history['timestamp'])
@@ -246,14 +252,19 @@ if not st.session_state['logged_in']:
         st.title("🔐 Expotime CRM")
         choice = st.selectbox("القائمة", ["تسجيل دخول", "تسجيل مندوب جديد"])
         if choice == "تسجيل دخول":
-            user = st.text_input("اسم المستخدم")
-            pw = st.text_input("كلمة المرور", type="password")
-            if st.button("دخول"):
-                account = login_user(user, pw)
-                if account:
-                    st.session_state.update({'logged_in': True, 'user_role': account[2], 'real_name': account[3]})
-                    st.rerun()
-                else: st.error("بيانات خاطئة")
+            # --- تعديل: استخدام Form للدعم زر Enter ---
+            with st.form("login_form"):
+                user = st.text_input("اسم المستخدم")
+                pw = st.text_input("كلمة المرور", type="password")
+                submitted = st.form_submit_button("دخول")
+                
+                if submitted:
+                    account = login_user(user, pw)
+                    if account:
+                        st.session_state.update({'logged_in': True, 'user_role': account[2], 'real_name': account[3]})
+                        st.rerun()
+                    else: st.error("بيانات خاطئة")
+            # ----------------------------------------
         else:
             name = st.text_input("الاسم الكامل")
             user = st.text_input("اسم المستخدم")
@@ -315,7 +326,7 @@ else:
             else: st.warning("لا يوجد عملاء مسندين لهذا المندوب.")
 
     # ==========================
-    #      قسم الفعاليات (مع البحث والفلترة)
+    #      قسم الفعاليات (مع البحث والفلترة الذكية)
     # ==========================
     elif nav == "الفعاليات":
         st.header("📅 إدارة الفعاليات القادمة")
@@ -334,26 +345,33 @@ else:
         st.divider()
         st.subheader("📌 قائمة الفعاليات المتاحة")
         
-        # --- أدوات البحث والفلترة ---
         col_search, col_filter = st.columns([2, 1])
         with col_search:
             search_query = st.text_input("🔍 بحث عن فعالية (بالاسم أو المكان):")
         with col_filter:
-            months = ["الكل", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
-            selected_month = st.selectbox("📅 تصفية حسب الشهر:", months)
+            # قاموس للربط بين اسم الشهر والرقم
+            month_map = {
+                "الكل": [],
+                "يناير": ["يناير", "-01-", "/01/"], "فبراير": ["فبراير", "-02-", "/02/"],
+                "مارس": ["مارس", "-03-", "/03/"], "أبريل": ["أبريل", "-04-", "/04/"],
+                "مايو": ["مايو", "-05-", "/05/"], "يونيو": ["يونيو", "-06-", "/06/"],
+                "يوليو": ["يوليو", "-07-", "/07/"], "أغسطس": ["أغسطس", "-08-", "/08/"],
+                "سبتمبر": ["سبتمبر", "-09-", "/09/"], "أكتوبر": ["أكتوبر", "-10-", "/10/"],
+                "نوفمبر": ["نوفمبر", "-11-", "/11/"], "ديسمبر": ["ديسمبر", "-12-", "/12/"]
+            }
+            selected_month_key = st.selectbox("📅 تصفية حسب الشهر:", list(month_map.keys()))
 
         events = get_all_events()
         
         if not events.empty:
-            # تطبيق الفلترة
             if search_query:
                 events = events[events['event_name'].str.contains(search_query, case=False, na=False) |
                                 events['location'].str.contains(search_query, case=False, na=False)]
             
-            if selected_month != "الكل":
-                events = events[events['event_date'].str.contains(selected_month, na=False)]
+            if selected_month_key != "الكل":
+                search_terms = month_map[selected_month_key]
+                events = events[events['event_date'].apply(lambda x: any(term in str(x) for term in search_terms))]
 
-            # عرض النتائج
             if not events.empty:
                 for index, event in events.iterrows():
                     is_taken = event['assigned_rep'] != 'غير محدد'
@@ -376,7 +394,7 @@ else:
                                     st.rerun()
                         st.divider()
             else:
-                st.warning("لا توجد فعاليات مطابقة للبحث.")
+                st.warning("لا توجد فعاليات مطابقة للبحث في هذا الشهر.")
         else: st.info("لا توجد فعاليات قادمة مسجلة حالياً.")
 
     elif nav == "بوابة المبيعات":
