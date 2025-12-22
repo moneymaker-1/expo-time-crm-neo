@@ -44,12 +44,11 @@ def init_db():
     conn = sqlite3.connect('company_crm.db', check_same_thread=False)
     c = conn.cursor()
     
-    # جدول العملاء (تم إضافة عمود created_at لتتبع تاريخ الإضافة)
+    # جدول العملاء
     c.execute('''CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
         mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد', created_at DATE)''')
     
-    # محاولة إضافة عمود created_at إذا كان الجدول موجوداً قديماً
     try:
         c.execute("ALTER TABLE customers ADD COLUMN created_at DATE")
     except:
@@ -142,9 +141,7 @@ def add_customer(data):
     c.execute("SELECT sales_rep FROM customers WHERE mobile = ? OR company_name = ?", (data[4], data[0]))
     exists = c.fetchone()
     if exists: return False
-    # إضافة التاريخ الحالي عند الإضافة
     today = date.today()
-    # نقوم بتوسيع البيانات لتشمل التاريخ
     data_with_date = data + (today,)
     c.execute('''INSERT INTO customers (company_name, sector, contact_person, position, mobile, email, event_name, sales_rep, status, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data_with_date)
@@ -153,20 +150,13 @@ def add_customer(data):
 
 # --- دوال التقارير ---
 def generate_rep_report(rep_name):
-    # جلب جميع عملاء المندوب
     c = conn.cursor()
     customers = pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(rep_name,))
-    
     if customers.empty:
         return pd.DataFrame(), pd.DataFrame()
-    
-    # تنظيف وتنسيق تواريخ الإضافة
     customers['created_at'] = pd.to_datetime(customers['created_at'], errors='coerce').dt.date
-    
-    # جلب سجل التفاعلات لهذا المندوب
     history = pd.read_sql("SELECT * FROM status_history WHERE changed_by = ?", conn, params=(rep_name,))
     history['timestamp'] = pd.to_datetime(history['timestamp'])
-    
     return customers, history
 
 # --- معالجة VCF ---
@@ -202,7 +192,7 @@ def parse_vcf_content(content):
                 })
     return pd.DataFrame(contacts_list).drop_duplicates(subset=['mobile'])
 
-def bulk_import(df, reps):
+def bulk_import_clients(df, reps):
     count = 0
     df.columns = [str(c).lower().strip() for c in df.columns]
     column_map = {
@@ -226,6 +216,24 @@ def bulk_import(df, reps):
                 mob, str(row.get('email', '')), str(row.get('event_name', '')), str(rep).strip(), "جديد")
         if data[0] and len(mob) > 5:
             if add_customer(data): count += 1
+    return count
+
+def bulk_import_events(df):
+    count = 0
+    df.columns = [str(c).lower().strip() for c in df.columns]
+    column_map = {
+        'event_name': 'event_name', 'اسم الفعالية': 'event_name', 'الفعالية': 'event_name',
+        'date': 'event_date', 'التاريخ': 'event_date', 'event_date': 'event_date',
+        'location': 'location', 'المكان': 'location', 'المدينة': 'location'
+    }
+    df = df.rename(columns=column_map)
+    for _, row in df.iterrows():
+        name = row.get('event_name')
+        date_val = row.get('event_date')
+        loc = row.get('location')
+        if name and date_val:
+            add_new_event(str(name), str(date_val), str(loc))
+            count += 1
     return count
 
 # ==========================================
@@ -270,12 +278,10 @@ else:
         st.rerun()
 
     # ==========================
-    #      قسم التقارير (الجديد)
+    #      قسم التقارير
     # ==========================
     elif nav == "التقارير":
         st.header("📑 تقارير الأداء المفصلة")
-        
-        # اختيار المندوب (للمدير الخيار، وللمندوب نفسه فقط)
         if role == 'admin':
             reps_list = get_all_reps()
             selected_rep = st.selectbox("اختر المندوب لاستخراج التقرير:", reps_list)
@@ -285,48 +291,28 @@ else:
 
         if selected_rep:
             customers_df, history_df = generate_rep_report(selected_rep)
-            
             if not customers_df.empty:
-                # 1. إحصائيات عامة
                 st.subheader("📊 ملخص الأداء")
                 c1, c2, c3 = st.columns(3)
                 c1.metric("إجمالي العملاء المسندين", len(customers_df))
-                
-                # حساب العملاء المضافين هذا الشهر
                 current_month = datetime.now().month
                 this_month_customers = customers_df[pd.to_datetime(customers_df['created_at']).dt.month == current_month]
                 c2.metric("عملاء جدد (هذا الشهر)", len(this_month_customers))
-                
-                # أكثر حالة تكراراً
                 top_status = customers_df['status'].mode()[0] if not customers_df.empty else "لا يوجد"
                 c3.metric("الحالة الأكثر شيوعاً", top_status)
-
                 st.divider()
-
-                # 2. تفاصيل العملاء وحالاتهم
                 st.subheader("📋 تفاصيل العملاء والحالة الحالية")
                 st.dataframe(customers_df[['company_name', 'mobile', 'status', 'created_at', 'event_name']], use_container_width=True)
-                
-                # زر تصدير للعملاء
                 csv_cust = customers_df.to_csv(index=False).encode('utf-8')
                 st.download_button("📥 تحميل قائمة العملاء (Excel/CSV)", data=csv_cust, file_name=f"Customers_{selected_rep}.csv", mime="text/csv")
-
                 st.divider()
-
-                # 3. سجل الحركات (ماذا حدث مع كل عميل)
                 st.subheader("📝 سجل المتابعات والتحديثات")
                 if not history_df.empty:
-                    # عرض آخر 50 عملية فقط لتحسين الأداء
                     st.dataframe(history_df[['customer_name', 'updated_status', 'notes', 'timestamp']], use_container_width=True)
-                    
-                    # زر تصدير للسجل
                     csv_hist = history_df.to_csv(index=False).encode('utf-8')
                     st.download_button("📥 تحميل سجل المتابعات كامل (Excel/CSV)", data=csv_hist, file_name=f"History_{selected_rep}.csv", mime="text/csv")
-                else:
-                    st.warning("لا يوجد سجل متابعات مسجل لهذا المندوب حتى الآن.")
-
-            else:
-                st.warning("لا يوجد عملاء مسندين لهذا المندوب.")
+                else: st.warning("لا يوجد سجل متابعات مسجل لهذا المندوب حتى الآن.")
+            else: st.warning("لا يوجد عملاء مسندين لهذا المندوب.")
 
     elif nav == "الفعاليات":
         st.header("📅 إدارة الفعاليات القادمة")
@@ -466,18 +452,33 @@ else:
             if st.button("حذف نهائي"): delete_user(u_del); st.rerun()
 
     elif nav == "استيراد ملف" and role == 'admin':
-        st.header("📤 استيراد العملاء")
-        st.info("يدعم ملفات Excel, CSV وأيضاً جهات الاتصال VCF مباشرة!")
+        st.header("📤 استيراد (عملاء / فعاليات)")
+        
+        # اختيار نوع الملف
+        upload_type = st.radio("ماذا تريد أن تستورد؟", ["👥 بيانات عملاء", "📅 جدول فعاليات"])
+        
         f = st.file_uploader("اختر الملف", type=['xlsx', 'csv', 'vcf'])
+        
         if f and st.button("بدء الاستيراد"):
             try:
-                if f.name.endswith('.vcf'):
-                    df = parse_vcf_content(f.read())
-                    st.write(f"تم قراءة {len(df)} جهة اتصال من ملف VCF. جاري الحفظ...")
-                else:
-                    df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
-                num = bulk_import(df, get_all_reps())
-                st.success(f"✅ تم استيراد وتخزين {num} عميل بنجاح!")
+                if upload_type == "👥 بيانات عملاء":
+                    if f.name.endswith('.vcf'):
+                        df = parse_vcf_content(f.read())
+                        st.write(f"تم قراءة {len(df)} جهة اتصال من ملف VCF. جاري الحفظ...")
+                    else:
+                        df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
+                    
+                    num = bulk_import_clients(df, get_all_reps())
+                    st.success(f"✅ تم استيراد وتخزين {num} عميل بنجاح!")
+                
+                else: # استيراد فعاليات
+                    if f.name.endswith('.vcf'):
+                        st.error("عفواً، لا يمكن استيراد الفعاليات من ملف VCF.")
+                    else:
+                        df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
+                        num = bulk_import_events(df)
+                        st.success(f"✅ تم إضافة {num} فعالية جديدة للجدول!")
+
             except Exception as e:
                 st.error(f"حدث خطأ: {e}")
 
