@@ -61,7 +61,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
     
-    # جدول الفعاليات
+    # جدول الفعاليات (تم تغيير نوع التاريخ إلى TEXT ليقبل الصيغ المعقدة في ملفك)
     c.execute('''CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT, event_date TEXT, location TEXT, assigned_rep TEXT)''')
     
@@ -118,12 +118,16 @@ def delete_user(user):
 
 def add_new_event(name, date, location):
     c = conn.cursor()
-    c.execute("INSERT INTO events (event_name, event_date, location, assigned_rep) VALUES (?, ?, ?, ?)", 
-              (name, date, location, 'غير محدد'))
-    conn.commit()
+    # التحقق من عدم التكرار
+    c.execute("SELECT id FROM events WHERE event_name = ?", (name,))
+    if not c.fetchone():
+        c.execute("INSERT INTO events (event_name, event_date, location, assigned_rep) VALUES (?, ?, ?, ?)", 
+                  (name, date, location, 'غير محدد'))
+        conn.commit()
+        return True
+    return False
 
 def get_all_events():
-    # تعديل لجلب الفعاليات كنص في حال كان التاريخ نصاً
     return pd.read_sql("SELECT * FROM events", conn)
 
 def assign_event_to_rep(event_id, rep_name):
@@ -222,14 +226,19 @@ def bulk_import_clients(df, reps):
 
 def bulk_import_events(df):
     count = 0
-    df.columns = [str(c).lower().strip() for c in df.columns]
+    # تنظيف أسماء الأعمدة من المسافات
+    df.columns = [str(c).strip() for c in df.columns]
     
-    # تحديث الخريطة لتقبل ملفك (events.csv)
-    column_map = {
-        'event_name': 'event_name', 'اسم الفعالية': 'event_name', 'الفعالية': 'event_name',
-        'date': 'event_date', 'التاريخ': 'event_date', 'event_date': 'event_date',
-        'location': 'location', 'المكان': 'location', 'المدينة': 'location', 'المكان / القاعة': 'location'
-    }
+    # خريطة دقيقة جداً بناءً على ملفك events.csv
+    column_map = {}
+    for col in df.columns:
+        if 'اسم الفعالية' in col or 'event_name' in col:
+            column_map[col] = 'event_name'
+        elif 'التاريخ' in col or 'date' in col:
+            column_map[col] = 'event_date'
+        elif 'المكان' in col or 'location' in col:
+            column_map[col] = 'location'
+            
     df = df.rename(columns=column_map)
     
     for _, row in df.iterrows():
@@ -237,10 +246,10 @@ def bulk_import_events(df):
         date_val = row.get('event_date')
         loc = row.get('location')
         
-        # التأكد من وجود البيانات الأساسية
         if pd.notna(name) and pd.notna(date_val):
-            add_new_event(str(name), str(date_val), str(loc) if pd.notna(loc) else "")
-            count += 1
+            # تحويل القيم لنصوص لتجنب مشاكل التواريخ المعقدة
+            if add_new_event(str(name).strip(), str(date_val).strip(), str(loc).strip() if pd.notna(loc) else ""):
+                count += 1
     return count
 
 # ==========================================
@@ -468,9 +477,7 @@ else:
     elif nav == "استيراد ملف" and role == 'admin':
         st.header("📤 استيراد (عملاء / فعاليات)")
         
-        # اختيار نوع الملف
         upload_type = st.radio("ماذا تريد أن تستورد؟", ["👥 بيانات عملاء", "📅 جدول فعاليات"])
-        
         f = st.file_uploader("اختر الملف", type=['xlsx', 'csv', 'vcf'])
         
         if f and st.button("بدء الاستيراد"):
@@ -489,7 +496,16 @@ else:
                     if f.name.endswith('.vcf'):
                         st.error("عفواً، لا يمكن استيراد الفعاليات من ملف VCF.")
                     else:
-                        df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
+                        # تحسين: قراءة CSV مع التشفير العربي (utf-8-sig)
+                        if f.name.endswith('.csv'):
+                            try:
+                                df = pd.read_csv(f, encoding='utf-8')
+                            except UnicodeDecodeError:
+                                f.seek(0)
+                                df = pd.read_csv(f, encoding='utf-8-sig')
+                        else:
+                            df = pd.read_excel(f)
+
                         num = bulk_import_events(df)
                         st.success(f"✅ تم إضافة {num} فعالية جديدة للجدول!")
 
