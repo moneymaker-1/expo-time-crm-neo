@@ -44,15 +44,12 @@ def init_db():
     conn = sqlite3.connect('company_crm.db', check_same_thread=False)
     c = conn.cursor()
     
-    # جدول العملاء
     c.execute('''CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT, company_name TEXT, sector TEXT, contact_person TEXT, position TEXT, 
         mobile TEXT, email TEXT, event_name TEXT, sales_rep TEXT, status TEXT DEFAULT 'جديد', created_at DATE)''')
-    
     try:
         c.execute("ALTER TABLE customers ADD COLUMN created_at DATE")
-    except:
-        pass
+    except: pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS status_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, customer_name TEXT, 
@@ -61,7 +58,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password TEXT, role TEXT, real_name TEXT)''')
     
-    # جدول الفعاليات
     c.execute('''CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, event_name TEXT, event_date TEXT, location TEXT, assigned_rep TEXT)''')
     
@@ -118,7 +114,6 @@ def delete_user(user):
 
 def add_new_event(name, date, location):
     c = conn.cursor()
-    # التحقق من عدم التكرار
     c.execute("SELECT id FROM events WHERE event_name = ?", (name,))
     if not c.fetchone():
         c.execute("INSERT INTO events (event_name, event_date, location, assigned_rep) VALUES (?, ?, ?, ?)", 
@@ -154,18 +149,17 @@ def add_customer(data):
     conn.commit()
     return True
 
-# --- دوال التقارير ---
+# --- التقارير ---
 def generate_rep_report(rep_name):
     c = conn.cursor()
     customers = pd.read_sql("SELECT * FROM customers WHERE sales_rep = ?", conn, params=(rep_name,))
-    if customers.empty:
-        return pd.DataFrame(), pd.DataFrame()
+    if customers.empty: return pd.DataFrame(), pd.DataFrame()
     customers['created_at'] = pd.to_datetime(customers['created_at'], errors='coerce').dt.date
     history = pd.read_sql("SELECT * FROM status_history WHERE changed_by = ?", conn, params=(rep_name,))
     history['timestamp'] = pd.to_datetime(history['timestamp'])
     return customers, history
 
-# --- معالجة VCF ---
+# --- معالجة الملفات ---
 def parse_vcf_content(content):
     contacts_list = []
     cards = content.split(b'BEGIN:VCARD')
@@ -227,23 +221,16 @@ def bulk_import_clients(df, reps):
 def bulk_import_events(df):
     count = 0
     df.columns = [str(c).lower().strip() for c in df.columns]
-    
     column_map = {}
     for col in df.columns:
-        if 'اسم الفعالية' in col or 'event_name' in col:
-            column_map[col] = 'event_name'
-        elif 'التاريخ' in col or 'date' in col:
-            column_map[col] = 'event_date'
-        elif 'المكان' in col or 'location' in col:
-            column_map[col] = 'location'
-            
+        if 'اسم الفعالية' in col or 'event_name' in col: column_map[col] = 'event_name'
+        elif 'التاريخ' in col or 'date' in col: column_map[col] = 'event_date'
+        elif 'المكان' in col or 'location' in col: column_map[col] = 'location'
     df = df.rename(columns=column_map)
-    
     for _, row in df.iterrows():
         name = row.get('event_name')
         date_val = row.get('event_date')
         loc = row.get('location')
-        
         if pd.notna(name) and pd.notna(date_val):
             if add_new_event(str(name).strip(), str(date_val).strip(), str(loc).strip() if pd.notna(loc) else ""):
                 count += 1
@@ -328,17 +315,16 @@ else:
             else: st.warning("لا يوجد عملاء مسندين لهذا المندوب.")
 
     # ==========================
-    #      قسم الفعاليات
+    #      قسم الفعاليات (مع البحث والفلترة)
     # ==========================
     elif nav == "الفعاليات":
         st.header("📅 إدارة الفعاليات القادمة")
         
-        # إضافة فعالية يدوية للمدير
         if role == 'admin':
             with st.expander("➕ إضافة فعالية يدوياً"):
                 with st.form("add_event_form"):
                     e_name = st.text_input("اسم الفعالية")
-                    e_date = st.text_input("تاريخ الفعالية (مثال: 2025-10-10)")
+                    e_date = st.text_input("تاريخ الفعالية (مثال: 1 أكتوبر 2025)")
                     e_loc = st.text_input("المكان / المدينة")
                     if st.form_submit_button("حفظ الفعالية"):
                         add_new_event(e_name, e_date, e_loc)
@@ -347,29 +333,50 @@ else:
         
         st.divider()
         st.subheader("📌 قائمة الفعاليات المتاحة")
+        
+        # --- أدوات البحث والفلترة ---
+        col_search, col_filter = st.columns([2, 1])
+        with col_search:
+            search_query = st.text_input("🔍 بحث عن فعالية (بالاسم أو المكان):")
+        with col_filter:
+            months = ["الكل", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+            selected_month = st.selectbox("📅 تصفية حسب الشهر:", months)
+
         events = get_all_events()
         
         if not events.empty:
-            for index, event in events.iterrows():
-                is_taken = event['assigned_rep'] != 'غير محدد'
-                with st.container():
-                    c1, c2, c3 = st.columns([2, 2, 1.5])
-                    with c1:
-                        st.markdown(f"### 🎉 {event['event_name']}")
-                        st.caption(f"📅 {event['event_date']} | 📍 {event['location']}")
-                    with c2:
-                        if is_taken:
-                            st.markdown(f"🔒 **المسؤول:** :red[{event['assigned_rep']}]")
-                            if event['assigned_rep'] == st.session_state['real_name']:
-                                st.success("✅ هذه الفعالية بعهدتك")
-                        else: st.markdown("🟢 **متاحة للاستلام**")
-                    with c3:
-                        if not is_taken:
-                            if st.button("✋ استلام الفعالية", key=f"evt_{event['id']}"):
-                                assign_event_to_rep(event['id'], st.session_state['real_name'])
-                                st.toast(f"مبروك! أصبحت مسؤولاً عن {event['event_name']}")
-                                st.rerun()
-                    st.divider()
+            # تطبيق الفلترة
+            if search_query:
+                events = events[events['event_name'].str.contains(search_query, case=False, na=False) |
+                                events['location'].str.contains(search_query, case=False, na=False)]
+            
+            if selected_month != "الكل":
+                events = events[events['event_date'].str.contains(selected_month, na=False)]
+
+            # عرض النتائج
+            if not events.empty:
+                for index, event in events.iterrows():
+                    is_taken = event['assigned_rep'] != 'غير محدد'
+                    with st.container():
+                        c1, c2, c3 = st.columns([2, 2, 1.5])
+                        with c1:
+                            st.markdown(f"### 🎉 {event['event_name']}")
+                            st.caption(f"📅 {event['event_date']} | 📍 {event['location']}")
+                        with c2:
+                            if is_taken:
+                                st.markdown(f"🔒 **المسؤول:** :red[{event['assigned_rep']}]")
+                                if event['assigned_rep'] == st.session_state['real_name']:
+                                    st.success("✅ هذه الفعالية بعهدتك")
+                            else: st.markdown("🟢 **متاحة للاستلام**")
+                        with c3:
+                            if not is_taken:
+                                if st.button("✋ استلام الفعالية", key=f"evt_{event['id']}"):
+                                    assign_event_to_rep(event['id'], st.session_state['real_name'])
+                                    st.toast(f"مبروك! أصبحت مسؤولاً عن {event['event_name']}")
+                                    st.rerun()
+                        st.divider()
+            else:
+                st.warning("لا توجد فعاليات مطابقة للبحث.")
         else: st.info("لا توجد فعاليات قادمة مسجلة حالياً.")
 
     elif nav == "بوابة المبيعات":
@@ -473,10 +480,8 @@ else:
 
     elif nav == "استيراد ملف" and role == 'admin':
         st.header("📤 استيراد (عملاء / فعاليات)")
-        
         upload_type = st.radio("ماذا تريد أن تستورد؟", ["👥 بيانات عملاء", "📅 جدول فعاليات"])
         f = st.file_uploader("اختر الملف", type=['xlsx', 'csv', 'vcf'])
-        
         if f and st.button("بدء الاستيراد"):
             try:
                 if upload_type == "👥 بيانات عملاء":
@@ -485,15 +490,12 @@ else:
                         st.write(f"تم قراءة {len(df)} جهة اتصال من ملف VCF. جاري الحفظ...")
                     else:
                         df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
-                    
                     num = bulk_import_clients(df, get_all_reps())
                     st.success(f"✅ تم استيراد وتخزين {num} عميل بنجاح!")
-                
                 else: # استيراد فعاليات
                     if f.name.endswith('.vcf'):
                         st.error("عفواً، لا يمكن استيراد الفعاليات من ملف VCF.")
                     else:
-                        # حل مشكلة التشفير في ملفات CSV (عربي/إنجليزي/Windows)
                         if f.name.endswith('.csv'):
                             encodings_to_try = ['utf-8', 'utf-8-sig', 'cp1256', 'iso-8859-1']
                             for enc in encodings_to_try:
@@ -501,19 +503,14 @@ else:
                                     f.seek(0)
                                     df = pd.read_csv(f, encoding=enc)
                                     break
-                                except UnicodeDecodeError:
-                                    continue
+                                except UnicodeDecodeError: continue
                             else:
                                 st.error("فشل قراءة الملف! يرجى حفظه بصيغة CSV UTF-8")
                                 st.stop()
-                        else:
-                            df = pd.read_excel(f)
-
+                        else: df = pd.read_excel(f)
                         num = bulk_import_events(df)
                         st.success(f"✅ تم إضافة {num} فعالية جديدة للجدول!")
-
-            except Exception as e:
-                st.error(f"حدث خطأ: {e}")
+            except Exception as e: st.error(f"حدث خطأ: {e}")
 
     elif nav == "بحث شامل":
         st.header("🔍 بحث شامل + استحواذ العملاء")
