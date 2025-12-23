@@ -4,8 +4,6 @@ import sqlite3
 
 import pandas as pd
 
-import plotly.express as px
-
 from datetime import datetime
 
 import re 
@@ -145,7 +143,6 @@ def validate_mobile(mobile):
     return len(cleaned_mobile) == 10 and cleaned_mobile.isdigit()
 
 
-
 def validate_email(email):
 
     """التحقق من صيغة الإيميل باستخدام تعبير نمطي بسيط"""
@@ -155,7 +152,10 @@ def validate_email(email):
     return re.match(regex, email) is not None
 
 
-
+def build_whatsapp_url(mobile):
+    """تجهيز رابط واتساب متوافق مع الرقم المخزن"""
+    digits = re.sub(r"\D", "", mobile or "")
+    return f"https://wa.me/{digits}" if digits else None
 # ==========================================
 
 #              دوال النظام
@@ -483,6 +483,9 @@ else:
                                 st.rerun()
 
                         st.info(f"**المنصب:** {client_row['position']} | **الفعالية:** {client_row['event_name']} | **القطاع:** {client_row['sector']}")
+                        whatsapp_url = build_whatsapp_url(client_row['mobile'])
+                        if whatsapp_url:
+                            st.link_button("📨 تواصل واتساب", whatsapp_url, use_container_width=True)
 
 
 
@@ -553,8 +556,26 @@ else:
                 all_df = get_all_data()
 
                 res_all = all_df[all_df.astype(str).apply(lambda x: x.str.contains(search_all, case=False)).any(axis=1)]
+                if not res_all.empty:
+                    st.dataframe(res_all, use_container_width=True)
 
-                st.dataframe(res_all, use_container_width=True)
+                    select_map = {
+                        row['id']: f"{row['company_name']} - {row['contact_person']}" for _, row in res_all.iterrows()
+                    }
+
+                    selected_global_id = st.selectbox(
+                        "👇 اختر العميل للتواصل:",
+                        options=list(select_map.keys()),
+                        format_func=lambda x: select_map[x]
+                    ) if select_map else None
+
+                    if selected_global_id is not None:
+                        selected_global_row = res_all[res_all['id'] == selected_global_id].iloc[0]
+                        whatsapp_global = build_whatsapp_url(selected_global_row['mobile'])
+                        if whatsapp_global:
+                            st.link_button("📨 تواصل واتساب", whatsapp_global, use_container_width=True)
+                else:
+                    st.info("لا توجد نتائج مطابقة.")
 
 
 
@@ -690,7 +711,7 @@ else:
 
     elif nav == "لوحة المدير" and role == 'admin':
 
-        st.header("📊 الإحصائيات")
+        st.header("📊 لوحة المدير")
 
         df = get_all_data()
 
@@ -698,16 +719,28 @@ else:
 
             c1, c2 = st.columns(2)
 
-            c1.metric("العملاء", len(df))
+            c1.metric("إجمالي العملاء", len(df))
 
-            c2.metric("تم التعميد", len(df[df['status'] == "تم التعميد"]))
+            c2.metric("العملاء المعتمدون", len(df[df['status'] == "تم التعميد"]))
 
-            st.plotly_chart(px.bar(df, x='sales_rep', color='status', 
-
-                                    category_orders={"status": TRIP_STAGES}), use_container_width=True)
-
-            st.dataframe(get_history_log(), use_container_width=True)
-
+        st.subheader("🧑‍💼 نشاط المندوبين")
+        history_log = get_history_log()
+        if history_log.empty:
+            st.info("لا يوجد سجل عمليات بعد.")
+        else:
+            history_log['timestamp'] = pd.to_datetime(history_log['timestamp'])
+            rep_groups = history_log.sort_values(by='timestamp', ascending=False).groupby('changed_by')
+            for rep_name, rep_df in rep_groups:
+                st.markdown(f"#### {rep_name if rep_name else 'غير محدد'}")
+                st.caption(f"إجمالي العمليات المسجلة: {len(rep_df)}")
+                rep_view = rep_df[['customer_name', 'updated_status', 'notes', 'timestamp']].copy()
+                rep_view = rep_view.rename(columns={
+                    'customer_name': 'العميل',
+                    'updated_status': 'المرحلة',
+                    'notes': 'ملاحظات',
+                    'timestamp': 'تاريخ التسجيل'
+                })
+                st.dataframe(rep_view, use_container_width=True)
 
 
     elif nav == "المستخدمين" and role == 'admin':
