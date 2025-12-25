@@ -252,7 +252,7 @@ if not st.session_state['logged_in']:
         st.title("🔐 Expotime CRM")
         choice = st.selectbox("القائمة", ["تسجيل دخول", "تسجيل مندوب جديد"])
         if choice == "تسجيل دخول":
-            # --- تعديل: استخدام Form للدعم زر Enter ---
+            # --- تسجيل الدخول مع زر Enter ---
             with st.form("login_form"):
                 user = st.text_input("اسم المستخدم")
                 pw = st.text_input("كلمة المرور", type="password")
@@ -264,7 +264,6 @@ if not st.session_state['logged_in']:
                         st.session_state.update({'logged_in': True, 'user_role': account[2], 'real_name': account[3]})
                         st.rerun()
                     else: st.error("بيانات خاطئة")
-            # ----------------------------------------
         else:
             name = st.text_input("الاسم الكامل")
             user = st.text_input("اسم المستخدم")
@@ -349,7 +348,6 @@ else:
         with col_search:
             search_query = st.text_input("🔍 بحث عن فعالية (بالاسم أو المكان):")
         with col_filter:
-            # قاموس للربط بين اسم الشهر والرقم
             month_map = {
                 "الكل": [],
                 "يناير": ["يناير", "-01-", "/01/"], "فبراير": ["فبراير", "-02-", "/02/"],
